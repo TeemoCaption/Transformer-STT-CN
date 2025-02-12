@@ -1,60 +1,60 @@
 import os
-import sys
+import jieba
 
-def get_data(wavs, id_to_text, maxlen=50):
+def get_data(sentences, maxlen=50):
     """
-    返回音頻路徑和轉錄文本的映射\n
+    取得句子資料\n
     參數：\n
-    id_to_text: 音頻id和轉錄文本的映射\n
-    maxlen: 最大文本長度
+    - sentences: 包含 `client_id` 和 `sentence` 的 DataFrame\n
+    - maxlen: 句子的最大長度\n
+    回傳：
+    - data: 包含 `text` 的字典列表\n
     """
     data = []
-    #print(maxlen)
-    for w in wavs:
-        id = os.path.basename(w).split(".")[0]
-        # 如果文本長度小於 maxlen，則將音頻路徑和文本添加到 data 中
-        if len(id_to_text[id]) < maxlen:
-            data.append({"audio": w, "text": id_to_text[id]})
+    for _, row in sentences.iterrows():
+        text = row["sentence"]
+        if len(text) < maxlen:
+            data.append({"text": text})
 
     return data
 
 class VectorizeChar:
     """
-    將文本轉換為數字序列（字符的索引值），並控制文本長度
+    將中文文本轉換為數字序列（字符索引值），並控制文本長度
     """
-    def __init__(self, max_len=50):
+    def __init__(self, sentences, max_len=50):
         """
         參數：\n
-        max_len: 最大文本長度
+        - sentences: 用於建立字典的句子列表\n
+        - max_len: 最大文本長度\n
         """
-        # 將英文字母（a-z）轉換為對應的字符，並加入一些特殊字符。
-        self.vocab = (
-            ["-","#" ,"<", ">"]
-            + [chr(i + 96) for i in range(1, 27)]
-            + [" ", ".", ",", "?"]
-        )
+        # 建立中文字典（根據資料集動態生成）
+        self.vocab = self.build_vocab(sentences)
         self.max_len = max_len
-        self.char_to_idx = {}
-        for i, ch in enumerate(self.vocab):
-            self.char_to_idx[ch] = i
+        self.char_to_idx = {ch: i for i, ch in enumerate(self.vocab)}
 
-    # 將文本轉換為數字序列(當對象像函數一樣被調用時會執行這個方法)
+    def build_vocab(self, sentences):
+        """
+        根據句子建立字典
+        """
+        vocab_set = set()
+        for text in sentences["sentence"]:
+            vocab_set.update(text)  # 直接使用字元級別的分割
+        vocab_list = ["<PAD>", "<UNK>", "<SOS>", "<EOS>"] + sorted(vocab_set)
+        return vocab_list
+
     def __call__(self, text):
         """
+        轉換文本為索引序列\n
         參數：\n
-        text: 文本
+        - text: 輸入的句子\n
+        回傳：\n
+        - 索引列表，長度固定為 max_len
         """
-        text = text.lower()
-        # 如果文本長度大於最大長度，則截斷文本
-        text = text[: self.max_len - 2]
-        text = "<" + text + ">"
-        # 將序列長度填充到 max_len，缺少的部分用 0 填充
+        # 加入起始與結束標記
+        text = "<SOS>" + text[: self.max_len - 2] + "<EOS>"  
         pad_len = self.max_len - len(text)
-        # 返回字符的索引值，如果字符在字典中找不到，則會用預設的 1 來處理，最後通過補充 0 來確保文本長度達到 max_len。
-        return [
-            self.char_to_idx.get(ch, 1) for ch in text
-        ] + [0] * pad_len
-
+        return [self.char_to_idx.get(ch, 1) for ch in text] + [0] * pad_len  # 1 = <UNK>
 
     def get_vocabulary(self):
         return self.vocab
