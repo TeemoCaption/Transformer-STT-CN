@@ -1,5 +1,7 @@
 import pandas as pd
 import os
+from entity.model_entity import CreateTensors
+from model.data_utils import VectorizeChar
 
 class DataPreprocessing:
     def __init__(self, tsv_path, audio_folder):
@@ -21,3 +23,8 @@ class DataPreprocessing:
             audio_path = os.path.join(self.audio_folder, row["path"])  # 取得完整音檔路徑
             data.append({"audio": audio_path, "sentence": row["sentence"]})
         return data
+    
+    def create_tensor_dataset(self):
+        data = self.load_tsv_data()
+        tensor_creator = CreateTensors(data, self.vectorizer)
+        return tensor_creator.create_tf_dataset()
