@@ -11,9 +11,15 @@ https://keithito.com/LJ-Speech-Dataset/
 
 ### 各檔案與資料夾說明
 
-- **`speech2txt.py`**：主程式。
-- **`model.py`**：語音模型程式。
-- **`preprocess.py`**：資料集前處理程式。
+/speech2text_project
+│── main.py               # 主程式，負責模型訓練與測試
+│── model.py              # 主要的 Transformer 語音轉文字模型
+│── utils.py              # 存放輔助函數 (學習率調整 & 訓練過程顯示)
+│── dataset/              # 存放數據集
+│── checkpoints/          # 存放模型檢查點
+│── requirements.txt      # 依賴項
+│── README.md             # 專案說明
+│── .gitignore            # Git 忽略規則
 
 ## 環境需求
 
