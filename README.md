@@ -12,13 +12,19 @@
 ## 📁 專案目錄結構
 
 ```
-/speech2text_project
-│── main.py               # 主程式，負責模型訓練與測試
-│── model.py              # Transformer 語音轉文字模型
-│── utils.py              # 存放輔助函數 (學習率調整 & 訓練過程顯示)
+/Transformer-STT-CN
+│── main.py               # 主程式，負責訓練與測試
+│── model/                # 模型相關程式碼
+│   │── model.py          # Transformer 語音轉文字模型
+│   │── utils.py          # 存放輔助函數 (學習率調整 & 訓練過程顯示)
+│── configs/              # 訓練參數、超參數設定
+│   │── config.yaml       # 訓練設定
+│── preprocessing/        # 資料前處理模組
+│   │── __init__.py       # 讓 preprocessing 成為 Python 模組
+│   │── preprocess.py     # 資料處理函數 (音檔讀取、特徵擷取、標準化等)
 │── dataset/              # 存放數據集
 │── checkpoints/          # 存放模型檢查點
-│── requirements.txt      # 依賴項
+│── requirements.txt      # 依賴套件
 │── README.md             # 專案說明
 │── .gitignore            # Git 忽略規則
 ```
