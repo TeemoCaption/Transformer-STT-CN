@@ -8,6 +8,8 @@ class DataPreprocessing:
     def __init__(self, tsv_path, audio_folder, test_size=0.2, random_state=42):
         self.tsv_path = tsv_path
         self.audio_folder = audio_folder
+        self.test_size = test_size  
+        self.random_state = random_state
         
     def load_tsv_data(self):
         """

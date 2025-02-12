@@ -56,7 +56,7 @@ class SpeechTrainer:
         print(self.vectorizer.get_vocabulary())
 
         # 轉換為 TensorFlow 數據集
-        self.train_dataset = CreateTensors(train_data, self.vectorizer).create_tf_dataset(bs=self.batch_size)
+        self.train_dataset = CreateTensors(train_data, self.vectorizer, self.audio_folder).create_tf_dataset(bs=self.batch_size)
         self.val_dataset = CreateTensors(val_data, self.vectorizer).create_tf_dataset(bs=self.val_batch_size)
 
         print(f"資料集處理完成！訓練數據: {len(train_data)} 筆, 驗證數據: {len(val_data)} 筆")

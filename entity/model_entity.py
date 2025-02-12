@@ -5,9 +5,10 @@ import tensorflow as tf
 from model.data_utils import VectorizeChar
 
 class CreateTensors:
-    def __init__(self, data: list, vectorizer: VectorizeChar):
+    def __init__(self, data: list, vectorizer: VectorizeChar, audio_folder: str):
         self.data = data
         self.vectorizer = vectorizer
+        self.audio_folder = audio_folder
     
     def path_to_audio(self, path):
         """
