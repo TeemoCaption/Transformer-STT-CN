@@ -1,5 +1,6 @@
-import sys
 import os
+import librosa
+import numpy as np
 import tensorflow as tf
 from model.data_utils import VectorizeChar
 
@@ -14,34 +15,54 @@ class CreateTensors:
         參數：\n
         path: 音檔路徑
         """
-        # tf.io.read_file 讀取音檔
-        audio = tf.io.read_file(path)
-        # tf.audio.decode_wav 解碼音檔，1 表示只讀取單聲道
-        audio, _ = tf.audio.decode_wav(audio, 1)
-        # tf.squeeze 用來移除指定維度大小為 1 的維度，axis=-1 代表對最後一個維度進行操作
-        audio = tf.squeeze(audio, axis=-1)
-        # tf.signal.stft 使用短時傅立葉變換將音頻轉換為頻譜圖
-        # frame_length 表示每一幀的長度，frame_step 表示每一幀之間的間隔，fft_length 表示傅立葉變換的點數
-        stfts = tf.signal.stft(audio, frame_length=200, frame_step=80, fft_length=256)
-        # tf.math.pow 對 stfts 的絕對值進行 0.5 次方運算
+        # 使用 librosa 讀取 MP3 檔案，sr=None 保持原取樣率
+        audio, sample_rate = librosa.load(path, sr=None, mono=True)
+
+        # 設定最大長度（10 秒）
+        max_duration = 10
+        target_length = int(sample_rate * max_duration)  # 計算最大取樣數
+
+        # 確保音訊長度符合標準
+        if len(audio) > target_length:
+            audio = audio[:target_length]  # 截斷
+        else:
+            pad_length = target_length - len(audio)
+            audio = np.pad(audio, (0, pad_length), mode='constant')  # 填充
+
+        # 根據取樣率調整 STFT 參數
+        if sample_rate == 16000:  # 語音數據（16kHz）
+            frame_length = 400
+            frame_step = 160
+            fft_length = 512
+            pad_len = 2754
+        elif sample_rate == 44100:  # 音樂數據（44.1kHz）
+            frame_length = 1024
+            frame_step = 512
+            fft_length = 1024
+            pad_len = 4000
+        else:  # 預設 16kHz
+            frame_length = 400
+            frame_step = 160
+            fft_length = 512
+            pad_len = 2754
+
+        # 轉換為 TensorFlow 張量
+        audio = tf.convert_to_tensor(audio, dtype=tf.float32)
+
+        # 計算 STFT
+        stfts = tf.signal.stft(audio, frame_length=frame_length, frame_step=frame_step, fft_length=fft_length)
+
+        # 取 STFT 絕對值開平方
         x = tf.math.pow(tf.abs(stfts), 0.5)
 
-        # tf.math.reduce_mean 求平均值，axis=1 表示對第二個維度進行操作，keepdims=True 表示保持維度
-        means = tf.math.reduce_mean(x, 1, keepdims=True)
-        # tf.math.reduce_std 求標準差
-        stddevs = tf.math.reduce_std(x, 1, keepdims=True)
         # 標準化
+        means = tf.math.reduce_mean(x, 1, keepdims=True)
+        stddevs = tf.math.reduce_std(x, 1, keepdims=True)
         x = (x - means) / stddevs
-
-        audio_len = tf.shape(x)[0]
+        
         # 填充至 10 秒
-        pad_len = 2754
-        # tf.constant 是用來創建一個常數張量的函數
-        # 第一行 [0, pad_len] 表示對第一個維度（時間或長度維度）進行填充，填充的方式是 在起始位置不進行填充（0），在結尾位置填充 pad_len 長度的空間
-        # 第二行 [0, 0] 表示對第二個維度（頻率維度）不進行填充
         paddings = tf.constant([[0, pad_len], [0, 0]])
-        # tf.pad 用來將張量 x 進行填充操作
-        # "CONSTANT" 表示填充的方式是用常數填充
+    
         x = tf.pad(x, paddings, "CONSTANT")[:pad_len, :]
 
         return x
