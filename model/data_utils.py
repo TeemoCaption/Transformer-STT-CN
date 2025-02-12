@@ -18,8 +18,8 @@ class VectorizeChar:
         根據句子建立字典
         """
         vocab_set = set()
-        for text in sentences["sentence"]:
-            vocab_set.update(text)  # 直接使用字元級別的分割
+        for text in sentences:  
+            vocab_set.update(text)  
         vocab_list = ["<PAD>", "<UNK>", "<SOS>", "<EOS>"] + sorted(vocab_set)
         return vocab_list
 
