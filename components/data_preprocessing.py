@@ -2,9 +2,10 @@ import pandas as pd
 import os
 from entity.model_entity import CreateTensors
 from model.data_utils import VectorizeChar
+from sklearn.model_selection import train_test_split
 
 class DataPreprocessing:
-    def __init__(self, tsv_path, audio_folder):
+    def __init__(self, tsv_path, audio_folder, test_size=0.2, random_state=42):
         self.tsv_path = tsv_path
         self.audio_folder = audio_folder
         
@@ -24,7 +25,13 @@ class DataPreprocessing:
             data.append({"audio": audio_path, "sentence": row["sentence"]})
         return data
     
-    def create_tensor_dataset(self):
+    def split_data(self):
+        """
+        將數據集劃分為訓練集和驗證集
+        回傳：
+        - train_data: 訓練集
+        - val_data: 驗證集
+        """
         data = self.load_tsv_data()
-        tensor_creator = CreateTensors(data, self.vectorizer)
-        return tensor_creator.create_tf_dataset()
+        train_data, val_data = train_test_split(data, test_size=self.test_size, random_state=self.random_state)
+        return train_data, val_data
