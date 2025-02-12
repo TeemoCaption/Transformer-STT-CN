@@ -13,15 +13,14 @@
 
 ```
 /Transformer-STT-CN
-│── main.py               # 主程式，負責訓練與測試
+│── main.py               # 主程式
 │── model/                # 模型相關程式碼
 │   │── model.py          # Transformer 語音轉文字模型
 │   │── utils.py          # 學習率調整 & 訓練過程顯示
 |   |── data_utils.py     # 音訊轉數字序列
 │── configs/              # 訓練參數、超參數設定
 │   │── config.yaml       # 訓練設定
-│── preprocessing/        # 資料前處理模組
-│   │── preprocess.py     # 資料處理函數 (音檔讀取、特徵擷取、標準化等)
+│── utils/                # 將音檔轉換為特徵
 │── dataset/              # 存放數據集
 │── checkpoints/          # 存放模型檢查點
 │── requirements.txt      # 依賴套件
