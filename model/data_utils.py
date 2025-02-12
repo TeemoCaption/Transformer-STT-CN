@@ -1,23 +1,3 @@
-import os
-import jieba
-
-def get_data(sentences, maxlen=50):
-    """
-    取得句子資料\n
-    參數：\n
-    - sentences: 包含 `client_id` 和 `sentence` 的 DataFrame\n
-    - maxlen: 句子的最大長度\n
-    回傳：
-    - data: 包含 `text` 的字典列表\n
-    """
-    data = []
-    for _, row in sentences.iterrows():
-        text = row["sentence"]
-        if len(text) < maxlen:
-            data.append({"text": text})
-
-    return data
-
 class VectorizeChar:
     """
     將中文文本轉換為數字序列（字符索引值），並控制文本長度
@@ -58,3 +38,20 @@ class VectorizeChar:
 
     def get_vocabulary(self):
         return self.vocab
+
+def get_data(sentences, maxlen=50):
+    """
+    取得句子資料\n
+    參數：\n
+    - sentences: 包含 `client_id` 和 `sentence` 的 DataFrame\n
+    - maxlen: 句子的最大長度\n
+    回傳：
+    - data: 包含 `text` 的字典列表\n
+    """
+    data = []
+    for _, row in sentences.iterrows():
+        text = row["sentence"]
+        if len(text) < maxlen:
+            data.append({"text": text})
+
+    return data
