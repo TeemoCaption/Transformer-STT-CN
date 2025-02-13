@@ -24,7 +24,7 @@ class DataPreprocessing:
         data = []
         for _, row in df.iterrows():
             audio_path = os.path.join(self.audio_folder, row["path"])  # 取得完整音檔路徑
-            data.append({"audio": audio_path, "sentence": row["sentence"]})
+            data.append({"path": audio_path, "sentence": row["sentence"]})
         return data
     
     def split_data(self):

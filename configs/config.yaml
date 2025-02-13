@@ -1,7 +1,7 @@
 data:
   tsv_path: "./dataset/validated.tsv"
-  audio_folder: "./dataset/clips"
-  test_size: 0.2
+  audio_folder: "./dataset/clips/"
+  test_size: 0.1
   max_target_len: 50
 
 training:

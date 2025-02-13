@@ -9,112 +9,127 @@ class CreateTensors:
         self.data = data
         self.vectorizer = vectorizer
         self.audio_folder = audio_folder
-    
+
     def path_to_audio(self, path):
         """
-        將音檔轉換為 stft 頻譜圖\n
-        參數：\n
-        path: 音檔路徑
+        將音檔轉換為 STFT 頻譜圖 (librosa)，保證輸出固定形狀 (1998, 257)
         """
-        # 使用 librosa 讀取 MP3 檔案，sr=None 保持原取樣率
-        audio, sample_rate = librosa.load(path, sr=None, mono=True)
+        max_duration = 10  # 固定 10 秒
+        target_sr = 32000  # 強制使用 32000 Hz
+        target_length = target_sr * max_duration  # = 320000
+        frame_length = 400   # 相當於 win_length
+        frame_step = 160     # 相當於 hop_length
+        fft_length = 512     # n_fft
+        fft_bins = fft_length // 2 + 1  # = 257
+        expected_frames = 1 + (target_length - frame_length) // frame_step  # = 1998
 
-        # 設定最大長度（10 秒）
-        max_duration = 10
-        target_length = int(sample_rate * max_duration)  # 計算最大取樣數
+        try:
+            audio, sr = librosa.load(path, sr=target_sr, mono=True)
+        except Exception as e:
+            print(f"【錯誤】讀取 {path} 失敗：{e}")
+            # 回傳全 0 頻譜，避免後續流程炸掉
+            return tf.zeros([expected_frames, fft_bins], dtype=tf.float32)
 
-        # 確保音訊長度符合標準
+        if audio is None or len(audio) == 0:
+            print(f"【警告】檔案 {path} 音訊長度為 0，回傳空頻譜。")
+            return tf.zeros([expected_frames, fft_bins], dtype=tf.float32)
+
+        # Debug: 確認音檔資訊
+        # print(f"[DEBUG] File: {path}")
+        # print(f"        Original Audio Length = {len(audio)}, Sample Rate = {sr}")
+
+        # 截斷或補零至 10 秒
         if len(audio) > target_length:
-            audio = audio[:target_length]  # 截斷
+            audio = audio[:target_length]
         else:
-            pad_length = target_length - len(audio)
-            audio = np.pad(audio, (0, pad_length), mode='constant')  # 填充
+            pad_len = target_length - len(audio)
+            audio = np.pad(audio, (0, pad_len), mode='constant')
 
-        # 根據取樣率調整 STFT 參數
-        if sample_rate == 16000:  # 語音數據（16kHz）
-            frame_length = 400
-            frame_step = 160
-            fft_length = 512
-            pad_len = 2754
-        elif sample_rate == 44100:  # 音樂數據（44.1kHz）
-            frame_length = 1024
-            frame_step = 512
-            fft_length = 1024
-            pad_len = 4000
-        else:  # 預設 16kHz
-            frame_length = 400
-            frame_step = 160
-            fft_length = 512
-            pad_len = 2754
-
-        # 轉換為 TensorFlow 張量
-        audio = tf.convert_to_tensor(audio, dtype=tf.float32)
-
-        # 計算 STFT
-        stfts = tf.signal.stft(audio, frame_length=frame_length, frame_step=frame_step, fft_length=fft_length)
-
-        # 取 STFT 絕對值開平方
-        x = tf.math.pow(tf.abs(stfts), 0.5)
-
-        # 標準化
-        means = tf.math.reduce_mean(x, 1, keepdims=True)
-        stddevs = tf.math.reduce_std(x, 1, keepdims=True)
-        x = (x - means) / stddevs
-        
-        # 填充至 10 秒
-        paddings = tf.constant([[0, pad_len], [0, 0]])
-    
-        x = tf.pad(x, paddings, "CONSTANT")[:pad_len, :]
-
-        return x
-    
-    def create_text_ds(self):
-        """
-        創建文本數據集
-        """
-        texts = [d["sentence"] for d in self.data]  # 取得每條數據的文本
-        # 將每個文本轉換為數字序列
-        text_ds = [self.vectorizer(t) for t in texts]
-        # tf.data.Dataset.from_tensor_slices 創建數據集
-        text_ds = tf.data.Dataset.from_tensor_slices(text_ds)
-        return text_ds
-    
-    def create_audio_ds(self):
-        """
-        創建音頻數據集
-        """
-        # 音檔完整路徑
-        audio_paths = [os.path.join(self.audio_folder, d["path"]) for d in self.data]  
-
-        # 檢查音檔是否存在
-        audio_paths = [p if os.path.exists(p) else None for p in audio_paths]
-
-        # 過濾掉 None 值（找不到音檔的情況）
-        audio_paths = list(filter(None, audio_paths))
-
-        # 轉換為 TensorFlow Dataset
-        audio_ds = tf.data.Dataset.from_tensor_slices(audio_paths)
-        audio_ds = audio_ds.map(
-            self.path_to_audio, num_parallel_calls=tf.data.AUTOTUNE  # 使用多線程加速
+        # ===============================
+        # 使用 librosa.stft 取頻譜
+        # ===============================
+        # shape: (n_fft/2+1, frames) = (257, frames)
+        stft_np = librosa.stft(
+            audio, n_fft=fft_length, hop_length=frame_step, win_length=frame_length
         )
+        # 取幅度的 0.5 次方
+        x = np.abs(stft_np)**0.5
+        # 轉置後就會是 (frames, 257)
+        x = x.T
+
+        # 標準化：對每個 frame 做減均值、除標準差
+        means = np.mean(x, axis=1, keepdims=True)
+        stds = np.std(x, axis=1, keepdims=True)
+        # 避免除以 0
+        idx = (stds > 1e-6).reshape(-1)
+        # 對非 0 的 frame 做標準化
+        x[idx, :] = (x[idx, :] - means[idx, :]) / (stds[idx, :] + 1e-6)
+
+        # 目前 x.shape = (frames, 257)
+        frames_now = x.shape[0]
+
+        # truncate 或補 zero
+        if frames_now > expected_frames:
+            x = x[:expected_frames, :]
+        elif frames_now < expected_frames:
+            pad_frames = expected_frames - frames_now
+            x = np.pad(x, ((0, pad_frames), (0, 0)), mode='constant')
+
+        # maybe shape = (1998, 257)
+        #print(f"        Final Spectrogram Shape = {x.shape}")
+
+        # 轉回 tf
+        x_tf = tf.convert_to_tensor(x, dtype=tf.float32)
+        # 靜態 shape，供後續 TF pipeline 驗證
+        x_tf.set_shape([expected_frames, fft_bins])
+
+        return x_tf
+
+    def create_text_ds(self):
+        texts = [d["sentence"] for d in self.data]
+        text_seqs = [self.vectorizer(t) for t in texts]
+        return tf.data.Dataset.from_tensor_slices(text_seqs)
+
+    def create_audio_ds(self):
+        audio_paths = []
+        for d in self.data:
+            if self.audio_folder in d["path"]:
+                full_path = d["path"]
+            else:
+                full_path = os.path.join(self.audio_folder, d["path"])
+            audio_paths.append(full_path)
+
+        print("【除錯】檢查拼接後的音檔路徑：")
+        for p in audio_paths:
+            if os.path.exists(p):
+                print(f"存在：{p}")
+            else:
+                print(f"不存在：{p}")
+
+        # 濾掉不存在的檔案
+        audio_paths = [p for p in audio_paths if os.path.exists(p)]
+        audio_ds = tf.data.Dataset.from_tensor_slices(audio_paths)
+
+        def load_audio(path):
+            path = path.numpy().decode('utf-8')
+            #print(f"【除錯】處理檔案：{path}")
+            return self.path_to_audio(path)
+
+
+        def load_audio_wrapper(path):
+            audio = tf.py_function(func=load_audio, inp=[path], Tout=tf.float32)
+            # 再次指定 shape，讓 TF dataset pipeline 知道輸出固定長度
+            audio.set_shape([1998, 257])
+            return audio
+
+        audio_ds = audio_ds.map(load_audio_wrapper, num_parallel_calls=tf.data.AUTOTUNE)
         return audio_ds
 
     def create_tf_dataset(self, bs=4):
-        """
-        創建數據集\n
-        參數：\n
-        - data: 數據\n
-        - vectorizer: 用於文本向量化的實例\n
-        - bs: 批次大小
-        """
         audio_ds = self.create_audio_ds()
         text_ds = self.create_text_ds()
-        # tf.data.Dataset.zip 將兩個數據集合併
         ds = tf.data.Dataset.zip((audio_ds, text_ds))
-        # source: 音頻，target: 文本
         ds = ds.map(lambda x, y: {"source": x, "target": y})
-        # batch 是將數據集分成多個批次，每個批次的大小是 bs
         ds = ds.batch(bs)
-        # prefetch 是用來加速數據集的方法，tf.data.AUTOTUNE 表示自動選擇最佳的參數
         ds = ds.prefetch(tf.data.AUTOTUNE)
         return ds

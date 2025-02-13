@@ -57,7 +57,7 @@ class SpeechTrainer:
 
         # 轉換為 TensorFlow 數據集
         self.train_dataset = CreateTensors(train_data, self.vectorizer, self.audio_folder).create_tf_dataset(bs=self.batch_size)
-        self.val_dataset = CreateTensors(val_data, self.vectorizer).create_tf_dataset(bs=self.val_batch_size)
+        self.val_dataset = CreateTensors(val_data, self.vectorizer, self.audio_folder).create_tf_dataset(bs=self.val_batch_size)
 
         print(f"資料集處理完成！訓練數據: {len(train_data)} 筆, 驗證數據: {len(val_data)} 筆")
 
@@ -125,6 +125,13 @@ class SpeechTrainer:
         執行完整流程
         """
         self.load_data()
-        # self.initialize_model()
-        # self.train_model()
-        # self.save_model()
+        self.initialize_model()
+        self.train_model()
+        self.save_model()
+
+def main():
+    trainer = SpeechTrainer(config_path="./configs/config.yaml")
+    trainer.run()  # 執行完整的訓練流程
+
+if __name__ == "__main__":
+    main()
