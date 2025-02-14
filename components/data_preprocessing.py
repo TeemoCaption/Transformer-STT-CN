@@ -1,190 +1,181 @@
-import os  # 檔案與路徑操作模組
+import os            # 檔案與路徑操作模組
+import math          # 數學函式，例如 math.ceil()
 import pandas as pd  # 資料處理模組
-import numpy as np  # 數值計算模組
-import librosa  # 音訊處理模組
-from joblib import Parallel, delayed  # 並行處理工具
-from tqdm import tqdm  # 顯示進度條
+import numpy as np   # 數值計算模組
+import librosa       # 音訊處理模組
+from joblib import Parallel, delayed  # 並行處理工具（內部可用 threading）
+from tqdm import tqdm           # 顯示進度條
 from sklearn.model_selection import train_test_split  # 資料切分工具
 import tensorflow as tf  # 深度學習框架
-import gc  # 垃圾回收模組，用於強制釋放記憶體
+import gc  # 垃圾回收模組，用來強制釋放記憶體
+import multiprocessing as mp  # 用於進程隔離
 
 from model.data_utils import VectorizeChar  # 文本向量化工具
+
+def process_chunk(chunk_idx, sub_data, config):
+    """
+    用於子進程中處理單個 chunk：
+      1. 建立一個 DataPreprocessing 物件（各項參數從 config 載入）
+      2. 對傳入的 sub_data (一個 list，每筆包含 "path" 與 "sentence")，
+         依序呼叫 path_to_spectrogram() 轉換音檔，並把結果存回 dict 中
+      3. 存成獨立的 npy 檔案：spectrogram_cache_folder/chunk_{chunk_idx}.npy
+    參數：
+      - chunk_idx: int，該 chunk 的索引
+      - sub_data: list，該 chunk 中的音檔資料
+      - config: dict，完整設定檔，子進程中用於建立 DataPreprocessing
+    """
+    # 在子進程中建立新的 DataPreprocessing 物件
+    dp = DataPreprocessing(config)
+    processed = []
+    for d in tqdm(sub_data, desc=f"Chunk {chunk_idx} 處理中", leave=False):
+        spec = dp.path_to_spectrogram(d["path"])
+        d["spectrogram"] = spec
+        processed.append(d)
+    chunk_file = os.path.join(dp.spectrogram_cache_folder, f"chunk_{chunk_idx}.npy")
+    np.save(chunk_file, np.array(processed, dtype=object))
+    print(f"Chunk {chunk_idx} 已儲存於 {chunk_file}")
 
 class DataPreprocessing:
     def __init__(self, config):
         """
         初始化 DataPreprocessing 物件，並根據設定檔初始化各項參數
-
-        參數：
-        - config: dict，讀自 config.yaml 的設定字典，包含資料、訓練、平行處理等設定
         """
         self.config = config
-        # TSV (validated.tsv) 檔案路徑
+
+        # 取得 audio_params 裡的音訊超參數
+        audio_params = config["data"]["audio_params"]
+        self.max_duration = audio_params["max_duration"]
+        self.target_sr = audio_params["target_sr"]
+        self.frame_length = audio_params["frame_length"]
+        self.frame_step = audio_params["frame_step"]
+        self.fft_length = audio_params["fft_length"]
+
+        # 其餘參數與設定
         self.tsv_path = config["data"]["tsv_path"]
-        # 音檔資料夾路徑
         self.audio_folder = config["data"]["audio_folder"]
-        # 切分訓練與驗證集的比例
         self.test_size = config["data"]["test_size"]
-        # 文字向量化時，最大序列長度
         self.max_target_len = config["data"]["max_target_len"]
-        # joblib 並行處理時開啟的 process 數量
         self.n_jobs = config["parallel"]["n_jobs"]
-        # 分批處理的大小，一次處理多少音檔，避免 RAM 爆掉
         self.chunk_size = config["data"].get("chunk_size", 1000)
-        # cache 資料夾路徑，若有設定則用來存放前處理後的 spectrogram cache
-        self.cache_folder = config["data"].get("cache_folder", None)
-        if self.cache_folder:
-            os.makedirs(self.cache_folder, exist_ok=True)  # 若 cache 資料夾不存在則建立
+        self.spectrogram_cache_folder = config["data"].get("spectrogram_cache_folder", None)
+        if self.spectrogram_cache_folder:
+            os.makedirs(self.spectrogram_cache_folder, exist_ok=True)
 
     def load_tsv_data(self):
         """
         從 TSV 檔案讀取所有音檔的路徑與對應中文句子，
         僅讀取 "path" 與 "sentence" 欄位，並回傳格式為 list[dict]
-
         回傳：
-        - data: list，每筆為 {"path": 完整音檔路徑, "sentence": 中文句子}
+          - data: list，每筆為 {"path": 完整音檔路徑, "sentence": 中文句子}
         """
         df = pd.read_csv(self.tsv_path, sep="\t", usecols=["path", "sentence"])
         data = []
         for _, row in df.iterrows():
-            # 拼接完整的音檔路徑
             audio_path = os.path.join(self.audio_folder, row["path"])
             data.append({"path": audio_path, "sentence": row["sentence"]})
         return data
 
     def path_to_spectrogram(self, full_path):
         """
-        將單一音檔轉換為 STFT 頻譜 (shape 為 (1998, 257))，
-        若讀檔失敗或音檔為空則回傳全 0 矩陣，以避免後續流程錯誤
-
-        參數：
-        - full_path: str，音檔完整路徑
-
-        回傳：
-        - x.astype(np.float32): NumPy 陣列，經過處理後的 spectrogram，型態為 float32
+        將單一音檔轉換為 STFT 頻譜，若讀檔失敗或音檔為空則回傳全 0 矩陣
         """
-        max_duration = 10  # 固定處理 10 秒音檔
-        target_sr = 32000  # 目標取樣率
-        target_length = target_sr * max_duration  # 目標音檔長度
-        frame_length = 400  # STFT 的視窗長度
-        frame_step = 160    # STFT 的步長
-        fft_length = 512    # FFT 的點數
-        fft_bins = fft_length // 2 + 1  # STFT 後的頻率軸數量
-        expected_frames = 1 + (target_length - frame_length) // frame_step  # 預期的時間軸幀數
+        max_duration = self.max_duration
+        target_sr = self.target_sr
+        frame_length = self.frame_length
+        frame_step = self.frame_step
+        fft_length = self.fft_length
+
+        target_length = target_sr * max_duration
+        fft_bins = fft_length // 2 + 1
+        expected_frames = 1 + (target_length - frame_length) // frame_step
 
         try:
-            # 讀取音檔：使用 librosa.load 轉為 NumPy 陣列，若原始取樣率不同則重採樣至 target_sr，mono=True 轉單聲道
             audio, _ = librosa.load(full_path, sr=target_sr, mono=True)
         except:
-            # 若讀檔出錯，回傳全 0 矩陣，避免後續錯誤
             return np.zeros((expected_frames, fft_bins), dtype=np.float32)
-
         if audio is None or len(audio) == 0:
-            # 若讀到空音檔，回傳全 0 矩陣
             return np.zeros((expected_frames, fft_bins), dtype=np.float32)
-
-        # 若音檔超過 target_length，則截斷；不足則補零
         if len(audio) > target_length:
             audio = audio[:target_length]
         else:
             pad_len = target_length - len(audio)
             audio = np.pad(audio, (0, pad_len), mode="constant")
-
-        # 計算 STFT 頻譜，返回 shape 為 (n_fft/2+1, frames)
         stft_np = librosa.stft(audio, n_fft=fft_length, hop_length=frame_step, win_length=frame_length)
-        # 將頻譜轉置為 (frames, 257) 並取幅值的 0.5 次方
         x = (np.abs(stft_np)**0.5).T
-
-        # 對每個 frame 進行標準化：減均值除以標準差
         means = np.mean(x, axis=1, keepdims=True)
         stds = np.std(x, axis=1, keepdims=True)
-        idx = (stds > 1e-6).reshape(-1)  # 避免標準差為 0 的情況
+        idx = (stds > 1e-6).reshape(-1)
         x[idx, :] = (x[idx, :] - means[idx, :]) / (stds[idx, :] + 1e-6)
-
-        # 若 frames 超過預期，則截斷；不足則補零
         frames_now = x.shape[0]
         if frames_now > expected_frames:
             x = x[:expected_frames, :]
         elif frames_now < expected_frames:
             pad_frames = expected_frames - frames_now
             x = np.pad(x, ((0, pad_frames), (0, 0)), mode="constant")
-
         return x.astype(np.float32)
 
-    def preprocess_all_audio(self):
+    def chunk_preprocess_and_save(self):
         """
-        分段 (chunk) 方式前處理音檔：
-          1. 讀取 TSV 檔案，取得所有音檔路徑與對應句子
-          2. 若有設定 cache 且 cache 檔案存在，則直接載入 cache，不再前處理
-          3. 若無 cache 則根據 chunk_size 分批處理音檔
-          4. 每個 chunk 使用 joblib.Parallel 並行計算 STFT，並使用 threading backend 降低記憶體占用
-          5. 每個 chunk 處理完後刪除暫存變數並呼叫 gc.collect() 強制釋放記憶體
-          6. 前處理完成後，若有 cache_folder 設定，存檔至 cache 供下次直接載入
-          7. 回傳包含 spectrogram 的整個 data list
+        以 chunk_size 為單位前處理音檔：
+          1. 讀取所有音檔資料，依據 chunk_size 分成多個 chunk
+          2. 對於每個 chunk，先檢查是否已存在對應的 npy 檔案
+             - 若存在，則跳過處理該 chunk
+             - 若不存在，啟動一個獨立子進程進行前處理與存檔
+          3. 子進程結束後，該 chunk 占用的記憶體會由 OS 回收
 
-        回傳：
-        - all_specs: list，每筆資料為 {"path": 音檔路徑, "sentence": 中文句子, "spectrogram": STFT 頻譜}
+        這樣下次訓練時會接續處理缺少的 chunk，而不必重複前處理已存在的資料。
         """
-        # 讀取 TSV 檔案，取得所有資料
         data = self.load_tsv_data()
-        print(f"總共有 {len(data)} 筆音檔, chunk_size={self.chunk_size} 分批進行")
+        total_chunks = math.ceil(len(data) / self.chunk_size)
+        print(f"總共有 {len(data)} 筆音檔，將以 chunk_size={self.chunk_size} 分批處理，共 {total_chunks} 個 chunk。")
 
-        # 若有設定 cache_folder，檢查 cache 檔案是否存在
-        cache_file = None
-        if self.cache_folder:
-            cache_file = os.path.join(self.cache_folder, "all_specs.npy")
-            if os.path.exists(cache_file):
-                print("發現 cache 檔案，直接載入 cache...")
-                # np.load 參數說明：
-                # - allow_pickle=True: 允許載入 Python 物件（例如 dict）
-                all_specs = np.load(cache_file, allow_pickle=True)
-                return all_specs.tolist()  # 轉換回 list
+        for chunk_idx in tqdm(range(total_chunks), desc="整體處理進度"):
+            # 檢查此 chunk 檔案是否已存在
+            chunk_file = os.path.join(self.spectrogram_cache_folder, f"chunk_{chunk_idx}.npy")
+            if os.path.exists(chunk_file):
+                print(f"Chunk {chunk_idx} 已存在，跳過處理。")
+                continue
 
-        all_specs = []  # 用來儲存所有音檔處理後的結果
-        start = 0
-        # 依據 chunk_size 逐批處理音檔
-        while start < len(data):
+            start = chunk_idx * self.chunk_size
             end = min(start + self.chunk_size, len(data))
             sub_data = data[start:end]
 
-            # 並行處理該 chunk，使用 threading backend 以避免 pickle 大型物件造成記憶體問題
-            print(f"處理 chunk: {start} ~ {end-1}, 共 {end-start} 個檔案")
-            specs = Parallel(n_jobs=self.n_jobs, backend="threading")(
-                delayed(self.path_to_spectrogram)(d["path"])
-                for d in tqdm(sub_data, desc=f"Chunk {start}-{end-1}")
-            )
-
-            # 將處理後的 spectrogram 加入到各筆資料中
-            for i, spec in enumerate(specs):
-                sub_data[i]["spectrogram"] = spec
-
-            # 合併該 chunk 結果至 all_specs
-            all_specs.extend(sub_data)
-
-            # 刪除不再使用的變數並強制呼叫垃圾回收，立即釋放記憶體
-            del sub_data
-            del specs
+            # 為每個 chunk 啟動一個獨立子進程進行處理
+            p = mp.Process(target=process_chunk, args=(chunk_idx, sub_data, self.config))
+            p.start()
+            p.join()  # 等待子進程結束
             gc.collect()
 
-            # 進入下一個 chunk
-            start = end
+        print("所有缺少的 chunk 處理完畢！")
 
-        # 若有設定 cache_folder，將結果存成 cache 以供下次直接載入
-        if self.cache_folder:
+    def preprocess_all_audio(self):
+        """
+        如果希望一次性載入所有前處理結果（例如後續 train/val 切分），
+        本方法會先檢查是否存在整合後的 cache 檔案（all_specs.npy），
+        若不存在則合併所有獨立 chunk 的資料，最後回傳整合後的清單。
+        回傳：
+          - all_specs: list，每筆資料為 {"path": 音檔路徑, "sentence": 中文句子, "spectrogram": STFT 頻譜}
+        """
+        cache_file = None
+        if self.spectrogram_cache_folder:
+            cache_file = os.path.join(self.spectrogram_cache_folder, "all_specs.npy")
+            if os.path.exists(cache_file):
+                print("發現整合 cache 檔案，直接載入...")
+                all_specs = np.load(cache_file, allow_pickle=True)
+                return all_specs.tolist()
+        all_specs = []
+        for file in sorted(os.listdir(self.spectrogram_cache_folder)):
+            if file.startswith("chunk_") and file.endswith(".npy"):
+                chunk_data = np.load(os.path.join(self.spectrogram_cache_folder, file), allow_pickle=True)
+                all_specs.extend(chunk_data.tolist())
+        if self.spectrogram_cache_folder:
             np.save(cache_file, np.array(all_specs, dtype=object))
-            print(f"Cache 儲存至 {cache_file}")
-
+            print(f"整合 cache 儲存於 {cache_file}")
         return all_specs
 
     def split_data(self, data):
         """
         使用 sklearn.train_test_split 將資料切分為訓練集與驗證集
-
-        參數：
-        - data: list，包含音檔資訊與 spectrogram 的資料列表
-
-        回傳：
-        - train_data, val_data: 切分後的訓練資料與驗證資料
         """
         train_data, val_data = train_test_split(
             data, 
@@ -196,12 +187,6 @@ class DataPreprocessing:
     def build_vectorizer(self, train_data):
         """
         建立文字向量化器 VectorizeChar，用於將中文句子轉換為數字序列
-
-        參數：
-        - train_data: list，訓練資料列表，內含 "sentence" 欄位
-
-        回傳：
-        - vectorizer: VectorizeChar 物件
         """
         sentences = [d["sentence"] for d in train_data]
         vectorizer = VectorizeChar(sentences, max_len=self.max_target_len)
@@ -210,55 +195,17 @@ class DataPreprocessing:
     def to_tf_dataset(self, dataset_list, vectorizer, batch_size=4):
         """
         將包含 "spectrogram" 與 "sentence" 的資料列表轉換為 tf.data.Dataset，
-        以利後續訓練時批次讀取資料。
-
-        參數：
-        - dataset_list: list，每筆資料為 {"spectrogram": ..., "sentence": ...}
-        - vectorizer: VectorizeChar 物件，用來將中文句子轉換成數字序列
-        - batch_size: int，每個批次的資料筆數
-
-        使用 TF 函式說明：
-        - tf.data.Dataset.from_tensor_slices( (spectrograms, text_seqs) )
-          參數：
-            spectrograms: NumPy 陣列，型態為 float32，每筆音檔的頻譜資料
-            text_seqs: NumPy 陣列，型態為 int32，每筆資料的數字化文字序列
-          功能：根據輸入陣列切片成多筆資料，每筆為 (x, y)
-        
-        - ds.map(lambda x, y: {"source": x, "target": y}, num_parallel_calls=tf.data.AUTOTUNE)
-          參數：
-            lambda x, y: {"source": x, "target": y}: 將每筆 (x, y) 轉換為 dict 格式
-            num_parallel_calls=tf.data.AUTOTUNE: 自動決定 map 操作使用的平行線程數量
-          功能：將切片後的資料映射成訓練模型所需的格式
-        
-        - ds.batch(batch_size)
-          參數：
-            batch_size: 每個批次資料的筆數
-          功能：將資料整理成批次，方便模型訓練
-        
-        - ds.prefetch(tf.data.AUTOTUNE)
-          參數：
-            tf.data.AUTOTUNE: 自動調整預取資料的數量
-          功能：在 CPU 與 GPU 交換資料時，提前預取下一個批次，提高訓練效能
-
-        回傳：
-        - ds: tf.data.Dataset 物件，包含打包好的資料批次
+        以利後續訓練時批次讀取資料
         """
-        spectrograms = []  # 儲存所有音檔的 spectrogram
-        text_seqs = []     # 儲存所有文字數字序列
+        spectrograms = []
+        text_seqs = []
         for d in dataset_list:
-            spectrograms.append(d["spectrogram"])  # 預期形狀 (1998, 257)
+            spectrograms.append(d["spectrogram"])
             text_seqs.append(vectorizer(d["sentence"]))
-
-        # 將列表轉換為 NumPy 陣列
         spectrograms = np.array(spectrograms, dtype=np.float32)
         text_seqs = np.array(text_seqs, dtype=np.int32)
-
-        # 將兩個 NumPy 陣列切片成多筆資料
         ds = tf.data.Dataset.from_tensor_slices((spectrograms, text_seqs))
-        # 將每筆資料 (x, y) 映射成 dict 格式 {"source": x, "target": y}
         ds = ds.map(lambda x, y: {"source": x, "target": y}, num_parallel_calls=tf.data.AUTOTUNE)
-        # 將資料整理成每批 batch_size 筆資料的批次
         ds = ds.batch(batch_size)
-        # 預先加載下一批資料，提升資料交換效率
         ds = ds.prefetch(tf.data.AUTOTUNE)
         return ds

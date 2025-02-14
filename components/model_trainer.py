@@ -1,4 +1,4 @@
-import os
+import os  # 檔案與路徑操作模組
 import yaml
 import tensorflow as tf
 
@@ -15,7 +15,6 @@ class SpeechTrainer:
         self.config = self.load_config(config_path)
 
         # ====== 讀取數據相關設定 ======
-        # 改用 DataPreprocessing 來一次性處理音訊
         self.tsv_path = self.config["data"]["tsv_path"]
         self.audio_folder = self.config["data"]["audio_folder"]
         self.test_size = self.config["data"]["test_size"]
@@ -44,30 +43,28 @@ class SpeechTrainer:
             return yaml.safe_load(file)
 
     def prepare_data(self):
-        """
-        使用 data_preprocessing.py 中的離線處理方法:
-         1. 一次性處理所有音檔 => 得到 dataList (含 spectrogram)
-         2. 切分 train / val
-         3. 建立 vectorizer
-         4. 產生 train_ds / val_ds
-        """
-        print("載入 & 並行處理音檔，然後切分資料集...")
-        dp = DataPreprocessing(self.config)
+        print("載入並處理音檔資料...")
 
-        # 1) 處理全部音檔 => data[i]["spectrogram"]
+        dp = DataPreprocessing(self.config)
+        spectrogram_cache_folder = self.config["data"].get("spectrogram_cache_folder", None)
+        need_chunk_process = True
+        if spectrogram_cache_folder and os.path.exists(spectrogram_cache_folder):
+            files = os.listdir(spectrogram_cache_folder)
+            if any(f.startswith("chunk_") and f.endswith(".npy") for f in files):
+                # 若已存在部分 chunk 檔案，就呼叫 chunk_preprocess_and_save() 讓其自動處理缺少的部分
+                need_chunk_process = True
+        if need_chunk_process and spectrogram_cache_folder:
+            print("開始處理缺少的 chunk 檔案...")
+            dp.chunk_preprocess_and_save()
+
         data = dp.preprocess_all_audio()
 
-        # 2) 切分成 train / val
         train_data, val_data = dp.split_data(data)
-
-        # 3) 建立文字向量化器(只用 train_data 的句子來建)
         self.vectorizer = dp.build_vectorizer(train_data)
-
-        # 4) 分別做 train_dataset / val_dataset
         self.train_dataset = dp.to_tf_dataset(train_data, self.vectorizer, self.batch_size)
         self.val_dataset = dp.to_tf_dataset(val_data, self.vectorizer, self.val_batch_size)
 
-        print(f"資料集處理完成！")
+        print("資料集處理完成！")
         print(f" - 訓練數據: {len(train_data)} 筆")
         print(f" - 驗證數據: {len(val_data)} 筆")
         print(f" - 字典大小: {len(self.vectorizer.get_vocabulary())}")
@@ -76,7 +73,7 @@ class SpeechTrainer:
         """
         初始化 Transformer 模型
         """
-        print("🔹 初始化 Transformer 模型...")
+        print("初始化 Transformer 模型...")
         self.model = Transformer(
             num_hid=self.model_params["num_hid"],
             num_head=self.model_params["num_head"],
@@ -110,8 +107,7 @@ class SpeechTrainer:
         # 編譯模型
         self.model.compile(optimizer=optimizer, loss=loss_fn)
 
-        # 設置 Callbacks
-        # 這裡先從 train_dataset 取一個 batch，用於 DisplayOutputs
+        # 設置 Callbacks，這裡先從 train_dataset 取一個 batch，用於 DisplayOutputs
         first_batch = next(iter(self.train_dataset))
         display_cb = DisplayOutputs(
             first_batch,
@@ -141,7 +137,7 @@ class SpeechTrainer:
     def run(self):
         """
         執行完整流程:
-          1) 離線並行處理所有音檔 + 切分 + 建立 Dataset
+          1) 離線並行處理所有音檔（含 chunk 前處理與 cache） + 切分 + 建立 Dataset
           2) 初始化模型
           3) 訓練
           4) 儲存模型
