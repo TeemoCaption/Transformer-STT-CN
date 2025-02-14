@@ -19,7 +19,9 @@
 │   │── utils.py          # 學習率調整 & 訓練過程顯示
 |   |── data_utils.py     # 文本轉數字序列
 │── entity/               # 創建資料集
-|── |──model_entity.py    
+|── |──model_entity.py 
+│── cache/                # 快取資料夾
+|── |──spectrogram_cache  # 離線儲存前處理頻譜（.npy 檔）
 │── configs/              # 訓練參數、超參數設定
 │   │── config.yaml       # 訓練設定
 │── dataset/              # 存放數據集

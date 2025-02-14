@@ -1,10 +1,10 @@
 import os
 import yaml
 import tensorflow as tf
-from model.model import Transformer
+
 from components.data_preprocessing import DataPreprocessing
-from entity.model_entity import CreateTensors
 from model.data_utils import VectorizeChar
+from model.model import Transformer
 from model.utils import CustomSchedule, DisplayOutputs
 
 class SpeechTrainer:
@@ -14,22 +14,23 @@ class SpeechTrainer:
         """
         self.config = self.load_config(config_path)
 
-        # 讀取數據相關設定
+        # ====== 讀取數據相關設定 ======
+        # 改用 DataPreprocessing 來一次性處理音訊
         self.tsv_path = self.config["data"]["tsv_path"]
         self.audio_folder = self.config["data"]["audio_folder"]
         self.test_size = self.config["data"]["test_size"]
         self.max_target_len = self.config["data"]["max_target_len"]
 
-        # 讀取訓練相關設定
+        # ====== 讀取訓練相關設定 ======
         self.batch_size = self.config["training"]["batch_size"]
         self.val_batch_size = self.config["training"]["val_batch_size"]
         self.epochs = self.config["training"]["epochs"]
         self.num_classes = self.config["training"]["num_classes"]
 
-        # 讀取模型超參數
+        # ====== 讀取模型超參數 ======
         self.model_params = self.config["model"]
 
-        # 初始化變數
+        # ====== 初始化變數 ======
         self.vectorizer = None
         self.train_dataset = None
         self.val_dataset = None
@@ -42,24 +43,34 @@ class SpeechTrainer:
         with open(config_path, "r", encoding="utf-8") as file:
             return yaml.safe_load(file)
 
-    def load_data(self):
+    def prepare_data(self):
         """
-        載入並分割資料集，初始化向量化器與數據集
+        使用 data_preprocessing.py 中的離線處理方法:
+         1. 一次性處理所有音檔 => 得到 dataList (含 spectrogram)
+         2. 切分 train / val
+         3. 建立 vectorizer
+         4. 產生 train_ds / val_ds
         """
-        print("載入資料集並分割中...")
-        data_processor = DataPreprocessing(self.tsv_path, self.audio_folder, test_size=self.test_size)
-        train_data, val_data = data_processor.split_data()  # 直接調用 split_data()
+        print("載入 & 並行處理音檔，然後切分資料集...")
+        dp = DataPreprocessing(self.config)
 
-        # 創建詞彙表
-        sentences = [d["sentence"] for d in train_data]
-        self.vectorizer = VectorizeChar(sentences, max_len=self.max_target_len)
-        print(self.vectorizer.get_vocabulary())
+        # 1) 全部音檔離線處理 => data[i]["spectrogram"]
+        data = dp.preprocess_all_audio()
 
-        # 轉換為 TensorFlow 數據集
-        self.train_dataset = CreateTensors(train_data, self.vectorizer, self.audio_folder).create_tf_dataset(bs=self.batch_size)
-        self.val_dataset = CreateTensors(val_data, self.vectorizer, self.audio_folder).create_tf_dataset(bs=self.val_batch_size)
+        # 2) 切分成 train / val
+        train_data, val_data = dp.split_data(data)
 
-        print(f"資料集處理完成！訓練數據: {len(train_data)} 筆, 驗證數據: {len(val_data)} 筆")
+        # 3) 建立文字向量化器(只用 train_data 的句子來建)
+        self.vectorizer = dp.build_vectorizer(train_data)
+
+        # 4) 分別做 train_dataset / val_dataset
+        self.train_dataset = dp.to_tf_dataset(train_data, self.vectorizer, self.batch_size)
+        self.val_dataset = dp.to_tf_dataset(val_data, self.vectorizer, self.val_batch_size)
+
+        print(f"資料集處理完成！")
+        print(f" - 訓練數據: {len(train_data)} 筆")
+        print(f" - 驗證數據: {len(val_data)} 筆")
+        print(f" - 字典大小: {len(self.vectorizer.get_vocabulary())}")
 
     def initialize_model(self):
         """
@@ -85,13 +96,14 @@ class SpeechTrainer:
         loss_fn = tf.keras.losses.CategoricalCrossentropy(from_logits=True, label_smoothing=0.1)
 
         # 設定學習率排程
+        steps_per_epoch = len(self.train_dataset)
         learning_rate = CustomSchedule(
             init_lr=0.00001,
             lr_after_warmup=0.001,
             final_lr=0.00001,
             warmup_epochs=15,
             decay_epochs=40,
-            steps_per_epoch=len(self.train_dataset),
+            steps_per_epoch=steps_per_epoch,
         )
         optimizer = tf.keras.optimizers.Adam(learning_rate)
 
@@ -99,11 +111,17 @@ class SpeechTrainer:
         self.model.compile(optimizer=optimizer, loss=loss_fn)
 
         # 設置 Callbacks
-        batch = next(iter(self.train_dataset))
-        display_cb = DisplayOutputs(batch, self.vectorizer.get_vocabulary(), target_start_token_idx=2, target_end_token_idx=3)
+        # 這裡先從 train_dataset 取一個 batch，用於 DisplayOutputs
+        first_batch = next(iter(self.train_dataset))
+        display_cb = DisplayOutputs(
+            first_batch,
+            self.vectorizer.get_vocabulary(),
+            target_start_token_idx=2,
+            target_end_token_idx=3
+        )
         early_stopping = tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)
 
-        # 訓練
+        # 開始 fit
         self.model.fit(
             self.train_dataset,
             validation_data=self.val_dataset,
@@ -122,12 +140,16 @@ class SpeechTrainer:
 
     def run(self):
         """
-        執行完整流程
+        執行完整流程:
+          1) 離線並行處理所有音檔 + 切分 + 建立 Dataset
+          2) 初始化模型
+          3) 訓練
+          4) 儲存模型
         """
-        self.load_data()
-        self.initialize_model()
-        self.train_model()
-        self.save_model()
+        self.prepare_data()
+        # self.initialize_model()
+        # self.train_model()
+        # self.save_model()
 
 def main():
     trainer = SpeechTrainer(config_path="./configs/config.yaml")
