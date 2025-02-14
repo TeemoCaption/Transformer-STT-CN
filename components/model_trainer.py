@@ -54,7 +54,7 @@ class SpeechTrainer:
         print("載入 & 並行處理音檔，然後切分資料集...")
         dp = DataPreprocessing(self.config)
 
-        # 1) 全部音檔離線處理 => data[i]["spectrogram"]
+        # 1) 處理全部音檔 => data[i]["spectrogram"]
         data = dp.preprocess_all_audio()
 
         # 2) 切分成 train / val
