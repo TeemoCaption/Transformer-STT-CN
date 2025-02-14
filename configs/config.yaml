@@ -20,4 +20,4 @@ model:
 
 # parallel 參數: n_jobs 代表開幾條 process/CPU核心處理
 parallel:
-  n_jobs: 5
+  n_jobs: 2
