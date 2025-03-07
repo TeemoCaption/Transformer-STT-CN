@@ -61,7 +61,7 @@ class AudioPreprocess:
             logging.error(f"處理失敗 {audio_path}: {e}")
 
     def create_chunked_dataset(self, h5_path, df, data_utils, word2idx, target_seq_len, audio_input_shape, batch_size=32, shuffle=True):
-        """建立批次資料生成器 (CTC 用)"""
+        """建立批次資料生成器"""
         def batch_generator():
             while True:
                 indices = list(range(len(df)))
@@ -80,29 +80,26 @@ class AudioPreprocess:
                             elif spec.shape[1] < desired_time:
                                 spec = np.pad(spec, ((0, 0), (0, desired_time - spec.shape[1])), mode='constant')
                             token_ids, _ = data_utils.tokenize_sentence(row['sentence'], word2idx)
-                            # 如果標籤序列為空，直接跳過這筆資料
-                            if len(token_ids) == 0:
-                                continue
-                            # 使用 0 作為 padding 值
-                            if len(token_ids) < target_seq_len:
-                                padded_token_ids = token_ids + [0] * (target_seq_len - len(token_ids))
-                            else:
-                                padded_token_ids = token_ids[:target_seq_len]
-                            batch_samples.append((spec, padded_token_ids))
+                            token_ids = token_ids[:target_seq_len] if len(token_ids) > target_seq_len else token_ids + [word2idx["<PAD>"]] * (target_seq_len - len(token_ids))
+                            decoder_input = token_ids[:-1]
+                            decoder_target = token_ids[1:]
+                            batch_samples.append((spec, decoder_input, decoder_target))
                             if len(batch_samples) == batch_size:
-                                spec_batch, label_batch = zip(*batch_samples)
-                                yield (np.array(spec_batch, dtype=np.float32), np.array(label_batch, dtype=np.int32))
+                                spec_batch, decoder_inputs_batch, decoder_targets_batch = zip(*batch_samples)
+                                yield ((np.array(spec_batch, dtype=np.float32), np.array(decoder_inputs_batch, dtype=np.int32)), np.array(decoder_targets_batch, dtype=np.int32))
                                 batch_samples = []
-                if batch_samples:
-                    spec_batch, label_batch = zip(*batch_samples)
-                    yield (np.array(spec_batch, dtype=np.float32), np.array(label_batch, dtype=np.int32))
+                                gc.collect()
+                    if batch_samples:
+                        spec_batch, decoder_inputs_batch, decoder_targets_batch = zip(*batch_samples)
+                        yield ((np.array(spec_batch, dtype=np.float32), np.array(decoder_inputs_batch, dtype=np.int32)), np.array(decoder_targets_batch, dtype=np.int32))
+                        gc.collect()
+
         ds = tf.data.Dataset.from_generator(
             batch_generator,
             output_signature=(
-                tf.TensorSpec(shape=(None, *audio_input_shape), dtype=tf.float32),
-                tf.TensorSpec(shape=(None, target_seq_len), dtype=tf.int32)
+                (tf.TensorSpec(shape=(None, *audio_input_shape), dtype=tf.float32),
+                 tf.TensorSpec(shape=(None, target_seq_len - 1), dtype=tf.int32)),
+                tf.TensorSpec(shape=(None, target_seq_len - 1), dtype=tf.int32)
             )
-        ).prefetch(1)  # 只預取 1 個批次，避免 RAM 累積
-
+        ).prefetch(tf.data.AUTOTUNE)
         return ds
-

@@ -33,24 +33,21 @@ class DataUtils:
         return re.sub(r"[^\u4e00-\u9fff]", "", sentence)
 
     def create_vocab(self, sentences, output_path):
-        """建立詞彙表並儲存（CTC用）：只使用純字符，不加入特殊 token。
-       預留 0 為 blank，其他字符從 1 開始編碼。
-        """
-        vocab_set = set()
+        """建立詞彙表並儲存"""
+        vocab_set = {"<PAD>", "<SOS>", "<EOS>", "<MASK>"}
         for sentence in sentences:
             vocab_set.update(self.clean_sentence(sentence))
-        sorted_vocab = sorted(vocab_set)
-        # 0 保留給 blank，所以從 1 開始
-        word2idx = {word: idx + 1 for idx, word in enumerate(sorted_vocab)}
+        vocab = sorted(vocab_set)
+        word2idx = {word: idx for idx, word in enumerate(vocab)}
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(word2idx, f, ensure_ascii=False, indent=4)
-        print(f"詞彙表已儲存至 '{output_path}'，總詞彙數：{len(word2idx)}")
+        print(f"詞彙表已儲存至 '{output_path}'\n總詞彙數：{len(word2idx)}")
         return word2idx
 
     def tokenize_sentence(self, sentence, word2idx):
-        """將句子轉換為 token ID 序列（CTC用），不加入 <SOS> 與 <EOS>"""
+        """將句子轉換為token ID序列"""
         cleaned = self.clean_sentence(sentence)
-        tokens = list(cleaned)
+        tokens = ["<SOS>"] + list(cleaned) + ["<EOS>"]
         token_ids = [word2idx[token] for token in tokens if token in word2idx]
         return token_ids, len(token_ids)
 
