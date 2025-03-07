@@ -103,13 +103,42 @@ class TransformerCTC(Model):
         return logits
 
     def compute_ctc_loss(self, y_true, y_pred):
-        """
-        計算 CTC 損失：
-         - y_true: (batch, max_label_length) 真實標籤序列，注意標籤值應大於 0（保留 0 為 blank）
-         - y_pred: (batch, time, num_classes) 模型輸出 logits
-        """
         batch_size = tf.shape(y_pred)[0]
+        # Get the input sequence length
         input_length = tf.fill([batch_size], tf.shape(y_pred)[1])
-        label_length = tf.reduce_sum(tf.cast(tf.not_equal(y_true, -1), tf.int32), axis=1)
-        loss = tf.keras.backend.ctc_batch_cost(y_true, y_pred, input_length, label_length)
+        
+        # Convert logits to log probabilities with softmax
+        log_probs = tf.nn.log_softmax(y_pred, axis=-1)
+        
+        # Find label lengths by counting non-zero values
+        label_length = tf.reduce_sum(tf.cast(tf.not_equal(y_true, 0), tf.int32), axis=1)
+        
+        # Ensure label_length is at least 1 to avoid empty labels
+        label_length = tf.maximum(label_length, 1)
+        
+        # Use tf.nn.ctc_loss instead of keras.backend.ctc_batch_cost
+        loss = tf.nn.ctc_loss(
+            labels=tf.cast(y_true, tf.int32),
+            logits=log_probs,
+            label_length=label_length,
+            logit_length=input_length,
+            blank_index=0,
+            logits_time_major=False
+        )
+        
         return tf.reduce_mean(loss)
+
+class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, d_model, warmup_steps=4000):
+        super(CustomSchedule, self).__init__()
+        self.d_model = tf.cast(d_model, tf.float32)
+        self.warmup_steps = warmup_steps
+
+    def __call__(self, step):
+        step = tf.cast(step, tf.float32)
+        arg1 = tf.math.rsqrt(step)
+        arg2 = step * (self.warmup_steps ** -1.5)
+        return tf.math.rsqrt(self.d_model) * tf.math.minimum(arg1, arg2)
+
+    def get_config(self):
+        return {"d_model": self.d_model.numpy(), "warmup_steps": self.warmup_steps}
