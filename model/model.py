@@ -128,4 +128,3 @@ class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
 
     def get_config(self):
         return {"d_model": self.d_model.numpy(), "warmup_steps": self.warmup_steps}
->>>>>>> aee2d04 (update)
