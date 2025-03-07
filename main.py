@@ -5,7 +5,7 @@ from utils.preprocess import AudioPreprocess
 import pandas as pd
 import h5py
 import json
-from model.model import Seq2Seq, CustomSchedule
+from model.model import TransformerCTC, CustomSchedule
 import tensorflow as tf
 import matplotlib.pyplot as plt
 
@@ -29,7 +29,7 @@ def main():
     audio_input_shape = (513, 238)
     train_dataset = audio_processor.create_chunked_dataset('./features/train_spectrograms.h5', train_df, data_utils, word2idx, 30, audio_input_shape, batch_size=128, shuffle=True)
     valid_dataset = audio_processor.create_chunked_dataset('./features/valid_spectrograms.h5', valid_df, data_utils, word2idx, 30, audio_input_shape, batch_size=128, shuffle=False)
-    model = Seq2Seq(audio_input_shape, 30, len(word2idx), d_model=128, num_enc_layers=3, num_dec_layers=3, num_heads=4, dff=256, dropout_rate=0.3)
+    model = TransformerCTC(audio_input_shape, len(word2idx), d_model=128, num_enc_layers=3, num_heads=4, dff=256, dropout_rate=0.3)
     learning_rate = CustomSchedule(128)
     optimizer = tf.keras.optimizers.Adam(learning_rate, beta_1=0.9, beta_2=0.98, epsilon=1e-9)
     loss_object = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False, reduction='none')
