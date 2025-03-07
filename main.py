@@ -1,13 +1,3 @@
-<<<<<<< HEAD
-from components.model_trainer import SpeechTrainer
-
-def main():
-    trainer = SpeechTrainer(config_path="./configs/config.yaml") 
-    trainer.run()  # 執行完整的訓練流程
-
-if __name__ == "__main__":
-    main()
-=======
 import os
 import math
 from utils.data_utils import DataUtils
@@ -84,4 +74,3 @@ def main():
 
 if __name__ == "__main__":
     main()
->>>>>>> aee2d04 (update)
