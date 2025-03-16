@@ -19,11 +19,7 @@ project/
 │       ├── unlabeled/
 │       └── labeled/
 ├── src/
-│   ├── data_preprocessing/     # 資料處理相關程式
-│   │   ├── convert_audio.py    # 音訊格式轉換（例如 16kHz、單聲道）
-│   │   ├── vad.py              # 語音活動檢測與分段（移除靜音）
-│   │   ├── augment.py          # 音頻增強，例如背景噪音、SpecAugment 等
-│   │   └── utils.py            # 共用工具函式（如檔案讀取、日誌記錄等）
+│   │── utils.py            # 共用工具函式（如檔案讀取、日誌記錄等）
 │   ├── models/                 # 模型架構定義
 │   │   ├── cnn_encoder.py      # CNN 特徵擷取層
 │   │   ├── transformer.py      # Transformer 上下文網路
