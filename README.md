@@ -22,10 +22,6 @@ project/
 │   │── utils.py            # 共用工具函式（如檔案讀取、日誌記錄等）
 │   │── audio_processing.py     # 音訊分割、採樣率轉換
 │   ├── models/                 # 模型架構定義
-│   │   ├── cnn_encoder.py      # CNN 特徵擷取層
-│   │   ├── transformer.py      # Transformer 上下文網路
-│   │   └── model_architecture.py  # 整體模型組合與前後端連接（含量化模組）
-│   └── training/               # 訓練相關程式
 │       ├── pretraining.py      # 自監督預訓練的程式（對比學習、遮罩預測）
 │       ├── finetuning.py       # 微調訓練程式（CTC 解碼、監督學習）
 │       └── scheduler.py        # 學習率調度、梯度累積等訓練策略
