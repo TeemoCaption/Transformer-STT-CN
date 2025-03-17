@@ -1,80 +1,61 @@
 import os
 import pandas as pd
-import subprocess
-from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import gc  # 垃圾回收模組
-from multiprocessing import cpu_count
-
-def convert_mp3_to_wav(input_path, output_path, sample_rate=16000):
-    """
-    使用 ffmpeg 將 mp3 轉換為 16kHz 單聲道的 wav 格式。
-    如果輸出檔案已存在，則直接略過。
-    """
-    if os.path.exists(output_path):
-        return "已存在，跳過"
-
-    command = [
-        'ffmpeg', '-y', '-i', input_path,
-        '-ac', '1',
-        '-ar', str(sample_rate),
-        output_path
-    ]
-    
-    result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    if result.returncode != 0:
-        return f"轉換失敗: {input_path}"
-    
-    return "轉換成功"
+import gc
+from tqdm import tqdm  
+from src.audio_processing import process_audio
 
 def generate_tasks(tsv_path, clips_dir, output_dir):
     """
-    逐行讀取 TSV，使用 generator 來減少記憶體消耗。
-    現在會產生所有任務，讓 convert_mp3_to_wav 自行檢查檔案是否已存在，
-    以便略過已處理過的檔案。
+    逐行讀取 TSV，使用 generator 減少記憶體消耗，生成轉換任務。
+    將每個輸出的 WAV 檔直接存放於 output_dir，不建立子資料夾。
     """
     df_iter = pd.read_csv(tsv_path, sep='\t', low_memory=False, chunksize=1000)
     for df in df_iter:
         for _, row in df.iterrows():
             mp3_path = os.path.join(clips_dir, row['path'])
-            relative_path = os.path.splitext(row['path'])[0] + '.wav'
-            wav_path = os.path.join(output_dir, relative_path)
-            os.makedirs(os.path.dirname(wav_path), exist_ok=True)
+            # 只取檔名，不保留原本的資料夾結構
+            wav_filename = os.path.splitext(os.path.basename(row['path']))[0] + '.wav'
+            wav_path = os.path.join(output_dir, wav_filename)
             yield (mp3_path, wav_path)
 
 def process_tsv(tsv_path, clips_dir, output_dir):
     """
-    讀取 TSV 檔案，逐個處理轉換任務，並略過已處理過的檔案，
-    同時計算成功轉換、略過及失敗的數量。
+    讀取 TSV 檔案，處理 MP3 轉 WAV，並顯示處理進度條。
     """
     print(f"讀取 {os.path.basename(tsv_path)} ...")
-    num_workers = min(cpu_count(), 2)
+    num_workers = 2  # 限制為 2 個執行緒
     print(f"使用 {num_workers} 個執行緒進行轉換 ...")
-    
-    # 產生所有任務，不再過濾已存在的檔案
+    os.makedirs(output_dir, exist_ok=True)
+    # 生成任務列表
     tasks = list(generate_tasks(tsv_path, clips_dir, output_dir))
-    converted, skipped, failed = 0, 0, 0
+    total_tasks = len(tasks)
+    processed, skipped, failed = 0, 0, 0
 
+    # 使用 ThreadPoolExecutor 並顯示進度條
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(convert_mp3_to_wav, mp3, wav): (mp3, wav) for mp3, wav in tasks}
+        with tqdm(total=total_tasks, desc="處理進度") as pbar:
+            futures = {executor.submit(process_audio, mp3, wav): (mp3, wav) for mp3, wav in tasks}
 
-        for future in tqdm(as_completed(futures), total=len(futures), desc=f"轉換 {os.path.basename(tsv_path)}"):
-            res = future.result()
-            if res == "轉換成功":
-                converted += 1
-            elif res == "已存在，跳過":
-                skipped += 1
-            elif "轉換失敗" in res:
-                failed += 1
+            for future in as_completed(futures):
+                mp3, wav = futures[future]
+                res = future.result().strip()  # 先 strip() 去除多餘空白與換行
 
-            if (converted + skipped + failed) % 100 == 0:
-                gc.collect()
+                if res.startswith("處理成功"):
+                    processed += 1
+                elif res == "已存在，跳過":
+                    skipped += 1
+                else:
+                    failed += 1
+                    print(f"處理失敗: {mp3} - {res}")
 
-    print(f"\n{os.path.basename(tsv_path)} 轉換結果:")
-    print(f"成功轉換: {converted}")
+                pbar.update(1)
+                if (processed + skipped + failed) % 50 == 0:
+                    gc.collect()
+
+    print(f"\n{os.path.basename(tsv_path)} 處理結果:")
+    print(f"成功處理: {processed}")
     print(f"已存在，略過: {skipped}")
     if failed > 0:
-        print(f"轉換失敗: {failed}")
-
+        print(f"處理失敗: {failed}")
     gc.collect()
