@@ -20,6 +20,7 @@ project/
 │       └── labeled/
 ├── src/
 │   │── utils.py            # 共用工具函式（如檔案讀取、日誌記錄等）
+│   │── audio_processing.py     # 音訊分割、採樣率轉換
 │   ├── models/                 # 模型架構定義
 │   │   ├── cnn_encoder.py      # CNN 特徵擷取層
 │   │   ├── transformer.py      # Transformer 上下文網路
