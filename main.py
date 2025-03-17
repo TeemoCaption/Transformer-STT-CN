@@ -49,7 +49,7 @@ def load_wav(filename):
     # 壓縮掉 channel 維度，使 waveform 形狀變成 (samples,)
     return tf.squeeze(waveform, axis=-1)
 
-def get_dataset(processed_dir, batch_size=8):
+def get_dataset(processed_dir, batch_size=1):
     """
     從 processed_dir 讀取所有 WAV 檔，建立 tf.data.Dataset 並進行批次化與隨機打亂
     """

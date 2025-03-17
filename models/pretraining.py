@@ -61,21 +61,27 @@ class ContiguousMasking(layers.Layer):
 
         # 定義一個只依賴於外部 seq_len 的 mask_sample 函數
         def mask_sample(_):
-            mask = tf.zeros((seq_len,), dtype=tf.bool)
+            mask_init = tf.zeros((seq_len,), dtype=tf.bool)
             max_start = seq_len - self.mask_length
-            # 如果 max_start 不正確（例如太小），直接返回全 0 的 mask
+
             def true_fn():
                 starts = tf.random.uniform([num_mask], minval=0, maxval=max_start, dtype=tf.int32)
-                # 迭代所有隨機起點，更新 mask
+                # 先做個副本，避免跟外層 scope 的 mask 名字重疊
+                mask_local = tf.identity(mask_init)
                 for start in tf.unstack(starts):
                     indices = tf.range(start, start + self.mask_length)
                     mask_updated = tf.ones([self.mask_length], dtype=tf.bool)
-                    mask = tf.tensor_scatter_nd_update(mask, tf.expand_dims(indices, 1), mask_updated)
-                return mask
+                    mask_local = tf.tensor_scatter_nd_update(
+                        mask_local, tf.expand_dims(indices, 1), mask_updated
+                    )
+                return mask_local
+
             def false_fn():
-                return mask
-            mask = tf.cond(max_start > 0, true_fn, false_fn)
-            return mask
+                return mask_init
+
+            mask_final = tf.cond(max_start > 0, true_fn, false_fn)
+            return mask_final
+
 
         # 遍歷 batch_size 個樣本，對每個生成一個 mask (shape: (seq_len,))
         masks = tf.map_fn(mask_sample, tf.range(batch_size), fn_output_signature=tf.bool)
