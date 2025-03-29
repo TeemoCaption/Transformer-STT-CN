@@ -21,33 +21,31 @@ def prepare_batch(batch, processor):
     """
     對單筆資料進行預處理：
     
-    1. 音訊：提取 array 並送入處理器獲得 input_values （返回值是 list，需要取 [0]）
-    2. 文字：使用 tokenizer 編碼轉錄為 labels 列表（不加特殊符號）
+    1. 音訊：提取 array 並送入處理器獲得 input_values（返回值是 list，需要取 [0]）
+    2. 文字：由於我們的詞彙表是依據字元建立，所以直接逐字查表，若該字不存在則用 unk_token_id 取代。
+       這樣可以確保每個 token 都在合法範圍內，避免出現超出 vocab_size 的情況。
     """
-    # 檢查句子是否為字符串
+    # 確保句子為字符串
     assert isinstance(batch["sentence"], str), "句子必須是字符串"
     
-    # 1. 音訊：提取 array 並送入處理器獲得 input_values （返回值是 list，需要取 [0]）
+    # 1. 音訊處理：提取 array 並送入處理器獲得 input_values
     audio = batch["audio"]
     inputs = processor(audio["array"], sampling_rate=audio["sampling_rate"], do_normalize=True)
     batch["input_values"] = inputs.input_values[0]
-    # 記錄模型輸入長度（音訊樣本數）
     batch["input_length"] = len(inputs.input_values[0])
     
-    # 2. 文字：使用 tokenizer 編碼轉錄為 labels 列表（不加特殊符號）
-    labels = processor.tokenizer(batch["sentence"]).input_ids
-    batch["labels"] = labels
-    
-    # 檢查標籤 ID 是否在詞彙大小範圍內
-    max_id = max(labels) if labels else -1
-    print(f"Sample sentence: '{batch['sentence']}', Labels: {labels}, Max ID: {max_id}")
-    
-    # 確保所有 ID 都在 0 到 vocab_size-1 之間
+    # 2. 文字處理：逐字查詞彙表
+    vocab = processor.tokenizer.get_vocab()  # 取得字元到 token id 的映射字典
     vocab_size = processor.tokenizer.vocab_size
-    assert all(0 <= id < vocab_size for id in labels), f"Label IDs out of range (vocab_size={vocab_size}): {labels}"
+    unk_id = processor.tokenizer.unk_token_id
     
-    # 記錄標籤長度（去除 -100 的有效標記數，在這裡就是序列長度）
-    batch["labels_length"] = len(batch["labels"])
+    # 針對每個字元，若不存在於詞彙表中則替換為 unk_id
+    labels = [vocab.get(char, unk_id) for char in batch["sentence"]]
+    batch["labels"] = labels
+    batch["labels_length"] = len(labels)
+    
+    # 檢查所有標籤都在合法範圍內（0 ~ vocab_size-1）
+    assert all(0 <= token < vocab_size for token in labels), f"Label IDs out of range (vocab_size={vocab_size}): {labels}"
     return batch
 
 def frame_generator(frame_duration_ms, audio, sample_rate):

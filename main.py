@@ -77,8 +77,12 @@ class KerasWav2Vec2ForCTC(tf.keras.Model):
     def train_step(self, data):
         x, y = data
         max_label = tf.reduce_max(y)
-        if max_label >= self.hf_model.config.vocab_size:
-            print(f"Batch max label ID: {max_label}, Invalid labels in batch: {y}")
+        # 使用 tf.debugging.assert_less 檢查標籤值是否超出範圍
+        tf.debugging.assert_less(
+            max_label,
+            self.hf_model.config.vocab_size,
+            message=f"Batch max label ID: {max_label}, Invalid labels in batch: {y}"
+        )
         with tf.GradientTape() as tape:
             outputs = self.hf_model(x, labels=y, training=True)
             loss = outputs.loss
