@@ -1,61 +1,91 @@
-import os
-import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import gc
-from tqdm import tqdm  
-from src.audio_processing import process_audio
+from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2Processor
+import collections
 
-def generate_tasks(tsv_path, clips_dir, output_dir):
+class Frame:
+    def __init__(self, bytes, timestamp, duration):
+        self.bytes = bytes
+        self.timestamp = timestamp
+        self.duration = duration
+
+def get_processor(tokenizer):
     """
-    逐行讀取 TSV，使用 generator 減少記憶體消耗，生成轉換任務。
-    將每個輸出的 WAV 檔直接存放於 output_dir，不建立子資料夾。
+    建立音訊特徵提取器並結合 tokenizer 成為處理器。
     """
-    df_iter = pd.read_csv(tsv_path, sep='\t', low_memory=False, chunksize=1000)
-    for df in df_iter:
-        for _, row in df.iterrows():
-            mp3_path = os.path.join(clips_dir, row['path'])
-            # 只取檔名，不保留原本的資料夾結構
-            wav_filename = os.path.splitext(os.path.basename(row['path']))[0] + '.wav'
-            wav_path = os.path.join(output_dir, wav_filename)
-            yield (mp3_path, wav_path)
+    # 建立音訊特徵提取器 (normalize 波形)
+    feature_extractor = Wav2Vec2FeatureExtractor(feature_size=1, sampling_rate=16000, do_normalize=True)
+    # 結合 tokenizer 和 feature_extractor 成一個處理器
+    processor = Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
+    return processor
 
-def process_tsv(tsv_path, clips_dir, output_dir):
+def prepare_batch(batch, processor):
     """
-    讀取 TSV 檔案，處理 MP3 轉 WAV，並顯示處理進度條。
+    對單筆資料進行預處理：
+    
+    1. 音訊：提取 array 並送入處理器獲得 input_values （返回值是 list，需要取 [0]）
+    2. 文字：使用 tokenizer 編碼轉錄為 labels 列表（不加特殊符號）
     """
-    print(f"讀取 {os.path.basename(tsv_path)} ...")
-    num_workers = 2  # 限制為 2 個執行緒
-    print(f"使用 {num_workers} 個執行緒進行轉換 ...")
-    os.makedirs(output_dir, exist_ok=True)
-    # 生成任務列表
-    tasks = list(generate_tasks(tsv_path, clips_dir, output_dir))
-    total_tasks = len(tasks)
-    processed, skipped, failed = 0, 0, 0
+    # 檢查句子是否為字符串
+    assert isinstance(batch["sentence"], str), "句子必須是字符串"
+    
+    # 1. 音訊：提取 array 並送入處理器獲得 input_values （返回值是 list，需要取 [0]）
+    audio = batch["audio"]
+    inputs = processor(audio["array"], sampling_rate=audio["sampling_rate"], do_normalize=True)
+    batch["input_values"] = inputs.input_values[0]
+    # 記錄模型輸入長度（音訊樣本數）
+    batch["input_length"] = len(inputs.input_values[0])
+    
+    # 2. 文字：使用 tokenizer 編碼轉錄為 labels 列表（不加特殊符號）
+    labels = processor.tokenizer(batch["sentence"]).input_ids
+    batch["labels"] = labels
+    
+    # 檢查標籤 ID 是否在詞彙大小範圍內
+    max_id = max(labels) if labels else -1
+    print(f"Sample sentence: '{batch['sentence']}', Labels: {labels}, Max ID: {max_id}")
+    
+    # 確保所有 ID 都在 0 到 vocab_size-1 之間
+    vocab_size = processor.tokenizer.vocab_size
+    assert all(0 <= id < vocab_size for id in labels), f"Label IDs out of range (vocab_size={vocab_size}): {labels}"
+    
+    # 記錄標籤長度（去除 -100 的有效標記數，在這裡就是序列長度）
+    batch["labels_length"] = len(batch["labels"])
+    return batch
 
-    # 使用 ThreadPoolExecutor 並顯示進度條
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        with tqdm(total=total_tasks, desc="處理進度") as pbar:
-            futures = {executor.submit(process_audio, mp3, wav): (mp3, wav) for mp3, wav in tasks}
+def frame_generator(frame_duration_ms, audio, sample_rate):
+    """
+    將音訊分割為幀。
+    """
+    frame_size = int(sample_rate * frame_duration_ms / 1000)
+    offset = 0
+    while offset + frame_size <= len(audio):
+        yield audio[offset:offset + frame_size]
+        offset += frame_size
 
-            for future in as_completed(futures):
-                mp3, wav = futures[future]
-                res = future.result().strip()  # 先 strip() 去除多餘空白與換行
-
-                if res.startswith("處理成功"):
-                    processed += 1
-                elif res == "已存在，跳過":
-                    skipped += 1
-                else:
-                    failed += 1
-                    print(f"處理失敗: {mp3} - {res}")
-
-                pbar.update(1)
-                if (processed + skipped + failed) % 50 == 0:
-                    gc.collect()
-
-    print(f"\n{os.path.basename(tsv_path)} 處理結果:")
-    print(f"成功處理: {processed}")
-    print(f"已存在，略過: {skipped}")
-    if failed > 0:
-        print(f"處理失敗: {failed}")
-    gc.collect()
+def vad_collector(sample_rate, frame_duration_ms, padding_duration_ms, vad, frames):
+    """
+    使用 VAD 收集語音段。
+    """
+    num_padding_frames = int(padding_duration_ms / frame_duration_ms)
+    ring_buffer = collections.deque(maxlen=num_padding_frames)
+    triggered = False
+    voiced_frames = []
+    for frame in frames:
+        is_speech = vad.is_speech(frame, sample_rate)
+        if not triggered:
+            ring_buffer.append((frame, is_speech))
+            num_voiced = len([f for f, speech in ring_buffer if speech])
+            if num_voiced > 0.9 * ring_buffer.maxlen:
+                triggered = True
+                for f, s in ring_buffer:
+                    voiced_frames.append(f)
+                ring_buffer.clear()
+        else:
+            voiced_frames.append(frame)
+            ring_buffer.append((frame, is_speech))
+            num_unvoiced = len([f for f, speech in ring_buffer if not speech])
+            if num_unvoiced > 0.9 * ring_buffer.maxlen:
+                triggered = False
+                yield b''.join(voiced_frames), len(voiced_frames)
+                ring_buffer.clear()
+                voiced_frames = []
+    if voiced_frames:
+        yield b''.join(voiced_frames), len(voiced_frames)
