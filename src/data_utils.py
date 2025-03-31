@@ -2,7 +2,7 @@ from datasets import load_dataset, Audio, concatenate_datasets
 from tqdm.auto import tqdm
 from transformers import Wav2Vec2CTCTokenizer
 import json
-
+import re  # 引入 re 模組以使用正則表達式
 
 def load_commonvoice_datasets():
     """
@@ -64,11 +64,24 @@ def merge_datasets(cv_zh, cv_tai, split_name="train"):
     return merged_dataset
 
 
+def clean_sentence(example):
+    """
+    清理標籤中的全形括號及其內容
+    """
+    example['sentence'] = re.sub(r'（.*?）', '', example['sentence']).strip()
+    return example
+
+
 def preprocess_dataset(train_dataset, valid_dataset, test_dataset):
     """
-    移除不必要欄位，只保留 audio 與 sentence，
+    清理標籤，移除不必要欄位，只保留 audio 與 sentence，
     並將 audio 轉換成 16kHz 的取樣率
     """
+    # 清理標籤
+    train_dataset = train_dataset.map(clean_sentence)
+    valid_dataset = valid_dataset.map(clean_sentence)
+    test_dataset = test_dataset.map(clean_sentence)
+    
     # 保留的欄位
     keep_cols = ["audio", "sentence"]
     # 找出不需要的欄位（假設三個資料集欄位相同）
@@ -94,6 +107,7 @@ def build_vocab(train_dataset):
     vocab_chars = sorted(set(all_texts))
     return vocab_chars
 
+
 def create_and_save_vocab(train_dataset, vocab_json_path="vocab.json"):
     """
     根據訓練資料建立字元集合、詞彙表字典，
@@ -106,25 +120,51 @@ def create_and_save_vocab(train_dataset, vocab_json_path="vocab.json"):
     # 建立 {字元: 索引} 詞彙表字典
     vocab_dict = {char: idx for idx, char in enumerate(vocab_chars)}
     
-    # 將空格替換為可見符號，例如用 '|' 表示空格
+    # 替換空格為 '|'，並保留相同的 index
     if " " in vocab_dict:
         space_index = vocab_dict[" "]
         vocab_dict["|"] = space_index
         del vocab_dict[" "]
         print(f"將空格替換為 '|'，索引為 {space_index}")
     
-    # 添加 CTC Blank (使用 [PAD] 作為 blank) 和 [UNK] 符號
-    vocab_dict["[UNK]"] = len(vocab_dict)
-    vocab_dict["[PAD]"] = len(vocab_dict)
+    # 使用詞彙表的長度作為新增特殊 token 的起始索引，避免 off-by-one 問題
+    new_index = len(vocab_dict)
+    vocab_dict["[UNK]"] = new_index
+    vocab_dict["[PAD]"] = new_index + 1
+
     print(f"最終詞彙表大小: {len(vocab_dict)}")
     
-    # 將詞彙表字典存為 JSON 檔
+    # 將詞彙表存為 JSON
     with open(vocab_json_path, "w", encoding="utf-8") as f:
         json.dump(vocab_dict, f, ensure_ascii=False)
     
-    # 使用詞彙表建立 Wav2Vec2CTCTokenizer
-    tokenizer = Wav2Vec2CTCTokenizer(vocab_json_path, 
-                                     unk_token="[UNK]", 
-                                     pad_token="[PAD]", 
+    # 建立 tokenizer
+    tokenizer = Wav2Vec2CTCTokenizer(vocab_json_path,
+                                     unk_token="[UNK]",
+                                     pad_token="[PAD]",
                                      word_delimiter_token="|")
+    
     return tokenizer, vocab_dict
+
+
+def debug_check_labels(train_dataset, processor):
+    """
+    檢查訓練資料中所有句子的字元是否超出 vocab 範圍
+    """
+    vocab = processor.tokenizer.get_vocab()
+    vocab_size = processor.tokenizer.vocab_size
+    unk_id = processor.tokenizer.unk_token_id
+    errors = []
+
+    print("開始檢查訓練資料中所有句子的字元是否超出 vocab...")
+    for i, sample in enumerate(tqdm(train_dataset, desc="檢查中")):
+        sentence = sample["sentence"]
+        labels = [vocab.get(char, unk_id) for char in sentence]
+
+        for j, token in enumerate(labels):
+            if token >= vocab_size:
+                print(f"第 {i} 筆資料異常 -> 字元: '{sentence[j]}', token ID: {token}, vocab_size: {vocab_size}")
+                errors.append((i, sentence, sentence[j], token))
+
+    print(f"\n檢查完畢，共發現 {len(errors)} 筆異常。")
+    return errors

@@ -1,6 +1,6 @@
 import os
 from datasets import load_from_disk
-from src.data_utils import load_commonvoice_datasets, merge_datasets, preprocess_dataset, create_and_save_vocab
+from src.data_utils import load_commonvoice_datasets, merge_datasets, preprocess_dataset, create_and_save_vocab, debug_check_labels
 from src.utils import get_processor, prepare_batch, frame_generator, vad_collector
 
 import tensorflow as tf
@@ -106,7 +106,8 @@ def webrtcvad_in_memory(audio_array, sample_rate=16000, frame_duration_ms=30, pa
     vad = webrtcvad.Vad(aggressiveness)
     frames = list(frame_generator(frame_duration_ms, raw_pcm, sample_rate))
     segments = vad_collector(sample_rate, frame_duration_ms, padding_duration_ms, vad, frames)
-    voiced_pcm = b''.join([seg[1] for seg in segments])
+    # 注意這裡由 seg[1] 改成 seg[0]
+    voiced_pcm = b''.join([seg[0] for seg in segments])
     if len(voiced_pcm) == 0:
         return np.zeros(0, dtype=np.float32)
     new_int16 = np.frombuffer(voiced_pcm, dtype=np.int16)
@@ -115,24 +116,34 @@ def webrtcvad_in_memory(audio_array, sample_rate=16000, frame_duration_ms=30, pa
 
 def main():
     preprocessed_path = "dataset/preprocessed"
-    if os.path.exists(preprocessed_path):
-        train_dataset = load_from_disk(os.path.join(preprocessed_path, "train"))
-        valid_dataset = load_from_disk(os.path.join(preprocessed_path, "valid"))
-        test_dataset  = load_from_disk(os.path.join(preprocessed_path, "test"))
+    train_path = os.path.join(preprocessed_path, "train")
+    valid_path = os.path.join(preprocessed_path, "valid")
+    test_path  = os.path.join(preprocessed_path, "test")
+    
+    # 檢查三個子目錄是否都存在
+    if os.path.exists(train_path) and os.path.exists(valid_path) and os.path.exists(test_path):
+        train_dataset = load_from_disk(train_path)
+        valid_dataset = load_from_disk(valid_path)
+        test_dataset  = load_from_disk(test_path)
         print("載入已快取的資料集（包含前一次 VAD 結果）")
     else:
+        # 子目錄不存在，進行資料預處理
         (cv_zh_train, cv_zh_valid, cv_zh_test,
          cv_tai_train, cv_tai_valid, cv_tai_test) = load_commonvoice_datasets()
+        
         train_dataset = merge_datasets(cv_zh_train, cv_tai_train, split_name="train")
         valid_dataset = merge_datasets(cv_zh_valid, cv_tai_valid, split_name="valid")
         test_dataset  = merge_datasets(cv_zh_test, cv_tai_test, split_name="test")
+        
         train_dataset, valid_dataset, test_dataset = preprocess_dataset(
             train_dataset, valid_dataset, test_dataset
         )
+        
+        # 如果需要進行 VAD 處理，可以用如下函式（例如 apply_webrtcvad）
         def apply_webrtcvad(example):
             sr = example["audio"]["sampling_rate"]
             if sr != 16000:
-                # 如有需要，可先重採樣到 16k
+                # 如有需要，先重採樣到 16kHz
                 pass
             float_array = example["audio"]["array"]
             new_array = webrtcvad_in_memory(
@@ -148,14 +159,18 @@ def main():
         train_dataset = train_dataset.map(apply_webrtcvad)
         valid_dataset = valid_dataset.map(apply_webrtcvad)
         test_dataset  = test_dataset.map(apply_webrtcvad)
-        os.makedirs(os.path.join(preprocessed_path, "train"), exist_ok=True)
-        os.makedirs(os.path.join(preprocessed_path, "valid"), exist_ok=True)
-        os.makedirs(os.path.join(preprocessed_path, "test"), exist_ok=True)
-        train_dataset.save_to_disk(os.path.join(preprocessed_path, "train"))
-        valid_dataset.save_to_disk(os.path.join(preprocessed_path, "valid"))
-        test_dataset.save_to_disk(os.path.join(preprocessed_path, "test"))
+        
+        # 自動建立子目錄（若不存在則建立）
+        os.makedirs(train_path, exist_ok=True)
+        os.makedirs(valid_path, exist_ok=True)
+        os.makedirs(test_path, exist_ok=True)
+        
+        train_dataset.save_to_disk(train_path)
+        valid_dataset.save_to_disk(valid_path)
+        test_dataset.save_to_disk(test_path)
         print("VAD 處理完畢，並已將資料集存到", preprocessed_path)
-
+    
+    # 之後的步驟維持不變...
     train_sample = train_dataset[0]
     print("第一筆訓練資料:")
     print("取樣率:", train_sample["audio"]["sampling_rate"])
@@ -164,6 +179,8 @@ def main():
 
     tokenizer, vocab_dict = create_and_save_vocab(train_dataset)
     processor = get_processor(tokenizer)
+    # 執行 label 檢查
+    debug_check_labels(train_dataset, processor)
 
     train_dataset = train_dataset.map(lambda batch: prepare_batch(batch, processor),
                                       remove_columns=train_dataset.column_names)
@@ -175,9 +192,12 @@ def main():
     print(train_dataset.features)
 
     batch_size = 1
+
+    # 訓練資料集生成器
     def train_generator():
         for sample in train_dataset:
             yield sample["input_values"], sample["labels"]
+
     output_signature = (
         tf.TensorSpec(shape=(None,), dtype=tf.float32),
         tf.TensorSpec(shape=(None,), dtype=tf.int32),
@@ -187,16 +207,19 @@ def main():
     train_tfds = train_tfds.padded_batch(
         batch_size=batch_size,
         padded_shapes=([None], [None]),
-        padding_values=(0.0, -100)
+        padding_values=(0.0, processor.tokenizer.pad_token_id)  # 使用 3411 代替 -100
     )
+
+    # 驗證資料集生成器
     def valid_generator():
         for sample in valid_dataset:
             yield sample["input_values"], sample["labels"]
+
     valid_tfds = tf.data.Dataset.from_generator(valid_generator, output_signature=output_signature)
     valid_tfds = valid_tfds.padded_batch(
         batch_size=batch_size,
         padded_shapes=([None], [None]),
-        padding_values=(0.0, -100)
+        padding_values=(0.0, processor.tokenizer.pad_token_id)  # 使用 3411 代替 -100
     )
 
     # 載入預訓練模型，注意使用 from_pt=True 從 PyTorch 權重轉換，但在 mixed precision 下，這是正常現象

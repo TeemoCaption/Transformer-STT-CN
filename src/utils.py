@@ -50,9 +50,10 @@ def prepare_batch(batch, processor):
 
 def frame_generator(frame_duration_ms, audio, sample_rate):
     """
-    將音訊分割為幀。
+    將音訊分割為幀，注意 audio 為 bytes，
+    每個樣本 16-bit (2 位元組)，因此需要乘以 2
     """
-    frame_size = int(sample_rate * frame_duration_ms / 1000)
+    frame_size = int(sample_rate * frame_duration_ms / 1000) * 2
     offset = 0
     while offset + frame_size <= len(audio):
         yield audio[offset:offset + frame_size]
