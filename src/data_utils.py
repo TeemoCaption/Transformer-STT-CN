@@ -112,22 +112,30 @@ def create_and_save_vocab(train_dataset, vocab_json_path="vocab.json"):
     """
     根據訓練資料建立字元集合、詞彙表字典，
     並存成 JSON 檔，同時建立 Wav2Vec2CTCTokenizer。
+    保證 [PAD] (CTC blank token) 分配到索引 0，不會與其他 token 衝突。
     """
+    # 從訓練資料建立字元集合
     vocab_chars = build_vocab(train_dataset)
     print(f"字元總數: {len(vocab_chars)}")
 
-    vocab_dict = {char: idx for idx, char in enumerate(vocab_chars)}
+    # 如果有空格，將其替換成 "|" (word delimiter token)
+    if " " in vocab_chars:
+        vocab_chars.remove(" ")
+        if "|" not in vocab_chars:
+            vocab_chars.append("|")
+        print("將空格替換為 '|'")
 
-    # 替換空格為分隔符號
-    if " " in vocab_dict:
-        space_index = vocab_dict[" "]
-        vocab_dict["|"] = space_index
-        del vocab_dict[" "]
-        print(f"將空格替換為 '|'，索引為 {space_index}")
+    # 重新排序，確保順序一致
+    vocab_chars = sorted(vocab_chars)
 
-    # 加入特殊符號（一定要加進 vocab_dict 裡才能寫入 JSON）
+    # 建立詞彙表，保留索引 0 給 [PAD] (CTC blank token)
+    vocab_dict = {"[PAD]": 0}
+    # 從索引 1 開始分配其他 token
+    for idx, char in enumerate(vocab_chars, start=1):
+        vocab_dict[char] = idx
+
+    # 加入 [UNK] token，分配到最後一個索引
     vocab_dict["[UNK]"] = len(vocab_dict)
-    vocab_dict["[PAD]"] = len(vocab_dict)
 
     print(f"最終詞彙表大小: {len(vocab_dict)}")
 

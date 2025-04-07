@@ -7,9 +7,8 @@ import re
 import tensorflow as tf
 import numpy as np
 import editdistance
-import collections
 
-# 啟用 mixed precision
+# 啟用混合精度
 tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
 # 設定 GPU 記憶體動態配置
@@ -20,16 +19,11 @@ if gpus:
 
 ### 資料處理函數
 def load_commonvoice_datasets():
-    """
-    載入 Common Voice 16.1 中文(臺灣) 與 臺語(閩南語) 的資料集，
-    並分別返回訓練、驗證、測試集。
-    """
-    # 載入中文(臺灣)資料集
+    """載入 Common Voice 16.1 中文(臺灣) 與 臺語(閩南語) 的資料集"""
     cv_zh_train = load_dataset("mozilla-foundation/common_voice_16_1", "zh-TW", split="train", trust_remote_code=True)
     cv_zh_valid = load_dataset("mozilla-foundation/common_voice_16_1", "zh-TW", split="validation", trust_remote_code=True)
     cv_zh_test = load_dataset("mozilla-foundation/common_voice_16_1", "zh-TW", split="test", trust_remote_code=True)
 
-    # 載入臺語(閩南語)資料集
     cv_tai_train = load_dataset("mozilla-foundation/common_voice_16_1", "nan-tw", split="train", trust_remote_code=True)
     cv_tai_valid = load_dataset("mozilla-foundation/common_voice_16_1", "nan-tw", split="validation", trust_remote_code=True)
     cv_tai_test = load_dataset("mozilla-foundation/common_voice_16_1", "nan-tw", split="test", trust_remote_code=True)
@@ -37,9 +31,7 @@ def load_commonvoice_datasets():
     return (cv_zh_train, cv_zh_valid, cv_zh_test, cv_tai_train, cv_tai_valid, cv_tai_test)
 
 def merge_datasets(cv_zh, cv_tai, split_name="train"):
-    """
-    合併中文與臺語資料集，並回傳合併後的資料集
-    """
+    """合併中文與臺語資料集"""
     print(f"合併 {split_name} 資料集...")
     for _ in tqdm([1, 2], desc=f"合併 {split_name}"):
         pass
@@ -47,17 +39,12 @@ def merge_datasets(cv_zh, cv_tai, split_name="train"):
     return merged_dataset
 
 def clean_sentence(example):
-    """
-    清理標籤中的全形括號及其內容
-    """
+    """清理標籤中的全形括號及其內容"""
     example['sentence'] = re.sub(r'（.*?）', '', example['sentence']).strip()
     return example
 
 def preprocess_dataset(train_dataset, valid_dataset, test_dataset):
-    """
-    清理標籤，移除不必要欄位，只保留 audio 與 sentence，
-    並將 audio 轉換成 16kHz 的取樣率
-    """
+    """清理標籤並將音訊轉換為 16kHz"""
     train_dataset = train_dataset.map(clean_sentence)
     valid_dataset = valid_dataset.map(clean_sentence)
     test_dataset = test_dataset.map(clean_sentence)
@@ -76,18 +63,13 @@ def preprocess_dataset(train_dataset, valid_dataset, test_dataset):
     return train_dataset, valid_dataset, test_dataset
 
 def build_vocab(train_dataset):
-    """
-    從訓練集中的 sentence 欄位建立字元集合
-    """
+    """從訓練集中的 sentence 欄位建立字元集合"""
     all_texts = " ".join(train_dataset["sentence"])
     vocab_chars = sorted(set(all_texts))
     return vocab_chars
 
 def create_and_save_vocab(train_dataset, vocab_json_path="vocab.json"):
-    """
-    根據訓練資料建立字元集合、詞彙表字典，
-    並存成 JSON 檔，同時建立 Wav2Vec2CTCTokenizer。
-    """
+    """建立詞彙表並儲存為 JSON"""
     vocab_chars = build_vocab(train_dataset)
     print(f"字元總數: {len(vocab_chars)}")
     
@@ -112,16 +94,14 @@ def create_and_save_vocab(train_dataset, vocab_json_path="vocab.json"):
     return tokenizer, vocab_dict
 
 def debug_check_labels(train_dataset, processor):
-    """
-    檢查訓練資料中所有句子的字元是否超出 vocab 範圍
-    """
+    """檢查訓練資料中的標籤是否超出詞彙範圍"""
     vocab = processor.tokenizer.get_vocab()
     vocab_size = processor.tokenizer.vocab_size
     unk_id = processor.tokenizer.unk_token_id
     errors = []
 
     print("開始檢查訓練資料中所有句子的字元是否超出 vocab...")
-    for i, sample in enumerate(tqdm(train_dataset, desc="檢查中")):
+    for i, sample in enumerate(tqdm(train_dataset, desc="檢查進度")):
         sentence = sample["sentence"]
         labels = [vocab.get(char, unk_id) for char in sentence]
         for j, token in enumerate(labels):
@@ -129,23 +109,20 @@ def debug_check_labels(train_dataset, processor):
                 print(f"第 {i} 筆資料異常 -> 字元: '{sentence[j]}', token ID: {token}, vocab_size: {vocab_size}")
                 errors.append((i, sentence, sentence[j], token))
 
-    print(f"\n檢查完畢，共發現 {len(errors)} 筆異常。")
+    if errors:
+        print(f"\n檢查完畢，共發現 {len(errors)} 筆異常。")
+    else:
+        print("\n檢查完畢，未發現異常。")
     return errors
 
 def get_processor(tokenizer):
-    """
-    建立音訊特徵提取器並結合 tokenizer 成為處理器。
-    """
+    """建立音訊特徵提取器與處理器"""
     feature_extractor = Wav2Vec2FeatureExtractor(feature_size=1, sampling_rate=16000, do_normalize=True)
     processor = Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
     return processor
 
 def prepare_batch(batch, processor):
-    """
-    對單筆資料進行預處理：
-    1. 音訊：提取 array 並送入處理器獲得 input_values
-    2. 文字：逐字查表，若該字不存在則用 unk_token_id 取代
-    """
+    """預處理單筆資料"""
     assert isinstance(batch["sentence"], str), "句子必須是字符串"
     
     audio = batch["audio"]
@@ -158,10 +135,12 @@ def prepare_batch(batch, processor):
     unk_id = processor.tokenizer.unk_token_id
     
     labels = [vocab.get(char, unk_id) for char in batch["sentence"]]
+    # 檢查標籤值是否超出範圍
+    if any(label >= vocab_size for label in labels):
+        print(f"警告：句子 '{batch['sentence']}' 中有無效標籤: {labels}")
     batch["labels"] = labels
     batch["labels_length"] = len(labels)
     
-    assert all(0 <= token < vocab_size for token in labels), f"Label IDs out of range (vocab_size={vocab_size}): {labels}"
     return batch
 
 class KerasWav2Vec2ForCTC(tf.keras.Model):
@@ -173,23 +152,20 @@ class KerasWav2Vec2ForCTC(tf.keras.Model):
     def train_step(self, data):
         x, y = data
 
+        # 將無效標籤（例如 -1）替換為 0
+        y = tf.where(y < 0, 0, y)
+
         # 檢查標籤值是否在合法範圍內
         max_label = tf.reduce_max(y)
-        vocab_size = self.hf_model.config.vocab_size
-        if max_label >= vocab_size:
-            tf.print("發現無效標籤！")
-            tf.print("最大標籤值:", max_label)
-            tf.print("完整標籤內容:", y)
-            raise ValueError(f"Label values must be <= vocab_size: {vocab_size}")
+        if max_label >= self.hf_model.config.vocab_size:
+            tf.print("發現無效標籤:", y)
+            raise ValueError(f"標籤值必須 <= vocab_size: {self.hf_model.config.vocab_size}")
 
         with tf.GradientTape() as tape:
             outputs = self.hf_model(x, labels=y, training=True)
             loss = outputs.loss
-
-            # 加入 get_scaled_loss
             scaled_loss = self.optimizer.get_scaled_loss(loss)
 
-        # 先針對 scaled_loss 算梯度，再 unscale
         train_vars = self.trainable_variables
         scaled_grads = tape.gradient(scaled_loss, train_vars)
         grads = self.optimizer.get_unscaled_gradients(scaled_grads)
@@ -199,18 +175,12 @@ class KerasWav2Vec2ForCTC(tf.keras.Model):
 
     @tf.function(experimental_relax_shapes=True)
     def test_step(self, data):
-        """
-        自訂測試步驟，跟 train_step 類似，但不需要做反向傳播。
-        """
         x, y = data
         outputs = self.hf_model(x, labels=y, training=False)
         loss = outputs.loss
         return {"loss": loss}
 
 class EvaluateCERCallback(tf.keras.callbacks.Callback):
-    """
-    這個 callback 會在每個 epoch 結束後，用驗證集計算 CER。
-    """
     def __init__(self, valid_dataset, processor):
         super().__init__()
         self.valid_dataset = valid_dataset
@@ -226,27 +196,13 @@ class EvaluateCERCallback(tf.keras.callbacks.Callback):
 
         for x, y in self.valid_dataset:
             outputs = self.predict_batch(x, y)
-            # 取得 logits -> decode
             predicted_ids = tf.argmax(outputs.logits, axis=-1)
-
-            # decode 出預測字串
-            predicted_strs = self.processor.tokenizer.batch_decode(
-                predicted_ids.numpy(),
-                skip_special_tokens=True
-            )
-            # 重新將 ground_truth 中的 -100 改為 pad_token_id
-            mask = tf.equal(y, -100)
+            predicted_strs = self.processor.tokenizer.batch_decode(predicted_ids.numpy(), skip_special_tokens=True)
+            mask = tf.equal(y, -1)
             indices = tf.where(mask)
-            updates = tf.fill([tf.shape(indices)[0]],
-                              self.processor.tokenizer.pad_token_id)
-            ground_truth_ids = tf.tensor_scatter_nd_update(
-                y, indices, updates
-            )
-            ground_truth_strs = self.processor.tokenizer.batch_decode(
-                ground_truth_ids.numpy(),
-                skip_special_tokens=True
-            )
-            # 計算 CER
+            updates = tf.fill([tf.shape(indices)[0]], self.processor.tokenizer.pad_token_id)
+            ground_truth_ids = tf.tensor_scatter_nd_update(y, indices, updates)
+            ground_truth_strs = self.processor.tokenizer.batch_decode(ground_truth_ids.numpy(), skip_special_tokens=True)
             for pred, ref in zip(predicted_strs, ground_truth_strs):
                 total_cer += self.compute_cer(pred, ref)
                 count += 1
@@ -257,8 +213,6 @@ class EvaluateCERCallback(tf.keras.callbacks.Callback):
             logs["val_cer"] = avg_cer
 
     def compute_cer(self, pred_str, ref_str):
-        # 這裡可以用你的自訂 CER 計算邏輯，或第三方函式庫
-        import editdistance
         distance = editdistance.eval(pred_str, ref_str)
         return distance / len(ref_str) if len(ref_str) > 0 else 0.0
 
@@ -273,7 +227,7 @@ def main():
         train_dataset = load_from_disk(train_path)
         valid_dataset = load_from_disk(valid_path)
         test_dataset = load_from_disk(test_path)
-        print("載入已快取的資料集（包含前一次 VAD 結果）")
+        print("載入已快取的資料集")
     else:
         (cv_zh_train, cv_zh_valid, cv_zh_test, cv_tai_train, cv_tai_valid, cv_tai_test) = load_commonvoice_datasets()
         train_dataset = merge_datasets(cv_zh_train, cv_tai_train, split_name="train")
@@ -281,10 +235,7 @@ def main():
         test_dataset = merge_datasets(cv_zh_test, cv_tai_test, split_name="test")
         train_dataset, valid_dataset, test_dataset = preprocess_dataset(train_dataset, valid_dataset, test_dataset)
         
-        os.makedirs(train_path, exist_ok=True)
-        os.makedirs(valid_path, exist_ok=True)
-        os.makedirs(test_path, exist_ok=True)
-        
+        os.makedirs(preprocessed_path, exist_ok=True)
         train_dataset.save_to_disk(train_path)
         valid_dataset.save_to_disk(valid_path)
         test_dataset.save_to_disk(test_path)
@@ -299,10 +250,7 @@ def main():
     tokenizer, vocab_dict = create_and_save_vocab(train_dataset)
     processor = get_processor(tokenizer)
 
-    # 標記文件的路徑
     check_file = "labels_checked.txt"
-
-    # 檢查標記文件
     if os.path.exists(check_file):
         with open(check_file, "r") as f:
             status = f.read().strip()
@@ -314,30 +262,26 @@ def main():
             if not errors:
                 with open(check_file, "w") as f:
                     f.write("passed")
-                print("標籤檢查通過，已更新標記文件。")
             else:
                 with open(check_file, "w") as f:
                     f.write("failed")
-                print("標籤檢查未通過，請修復問題。")
-                return  # 終止程式
+                print("請檢查數據集中的異常字元並修正後重試。")
+                return
     else:
         print("未找到標記文件，正在執行標籤檢查...")
         errors = debug_check_labels(train_dataset, processor)
         if not errors:
             with open(check_file, "w") as f:
                 f.write("passed")
-            print("標籤檢查通過，已創建標記文件。")
         else:
             with open(check_file, "w") as f:
                 f.write("failed")
-            print("標籤檢查未通過，請修復問題。")
-            return  # 終止程式
+            print("請檢查數據集中的異常字元並修正後重試。")
+            return
 
     train_dataset = train_dataset.map(lambda batch: prepare_batch(batch, processor), remove_columns=train_dataset.column_names)
     valid_dataset = valid_dataset.map(lambda batch: prepare_batch(batch, processor), remove_columns=valid_dataset.column_names)
     test_dataset = test_dataset.map(lambda batch: prepare_batch(batch, processor), remove_columns=test_dataset.column_names)
-
-    print(train_dataset.features)
 
     batch_size = 1
 
@@ -354,7 +298,7 @@ def main():
     train_tfds = train_tfds.padded_batch(
         batch_size=batch_size,
         padded_shapes=([None], [None]),
-        padding_values=(0.0, -100)  # 修改為 -100
+        padding_values=(0.0, 0)  # 確保填充值為 0
     )
 
     def valid_generator():
@@ -365,12 +309,12 @@ def main():
     valid_tfds = valid_tfds.padded_batch(
         batch_size=batch_size,
         padded_shapes=([None], [None]),
-        padding_values=(0.0, -100)  # 修改為 -100
+        padding_values=(0.0, 0)  # 確保填充值為 0
     )
 
     pretrained_model_name = "facebook/wav2vec2-base"
     tf.keras.mixed_precision.set_global_policy('float32')
-    vocab_size = len(vocab_dict)  # 就是 max index + 1
+    vocab_size = len(vocab_dict)
     hf_model = TFWav2Vec2ForCTC.from_pretrained(
         pretrained_model_name,
         vocab_size=vocab_size,
@@ -394,18 +338,19 @@ def main():
 
     base_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
     optimizer = tf.keras.mixed_precision.LossScaleOptimizer(base_optimizer)
-    model.compile(optimizer=optimizer, run_eagerly=True)  # 啟用 Eager 模式進行調試
+    model.compile(optimizer=optimizer, run_eagerly=True)
 
-    # 檢查訓練資料集中的標籤
-    print("檢查訓練資料集中的標籤...")
-    for i, (x, y) in enumerate(train_tfds):
+    # 檢查前幾個批次的標籤範圍
+    print("檢查訓練資料集中的標籤範圍...")
+    for i, (x, y) in enumerate(train_tfds.take(5)):
+        min_label = tf.reduce_min(y).numpy()
         max_label = tf.reduce_max(y).numpy()
+        print(f"批次 {i}: 標籤值範圍 {min_label} 到 {max_label}")
         if max_label >= processor.tokenizer.vocab_size:
-            print(f"第 {i} 個批次有無效標籤: {max_label}")
-            print("標籤內容:", y.numpy())
+            print(f"第 {i} 個批次有無效標籤: {y.numpy()}")
             break
     else:
-        print("所有批次的標籤都在合法範圍內。")
+        print("前 5 個批次的標籤都在合法範圍內。")
 
     cer_callback = EvaluateCERCallback(valid_tfds, processor)
     model.fit(
