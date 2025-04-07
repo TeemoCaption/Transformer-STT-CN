@@ -113,37 +113,33 @@ def create_and_save_vocab(train_dataset, vocab_json_path="vocab.json"):
     根據訓練資料建立字元集合、詞彙表字典，
     並存成 JSON 檔，同時建立 Wav2Vec2CTCTokenizer。
     """
-    # 從訓練資料建立字元集合
     vocab_chars = build_vocab(train_dataset)
     print(f"字元總數: {len(vocab_chars)}")
-    
-    # 建立 {字元: 索引} 詞彙表字典
+
     vocab_dict = {char: idx for idx, char in enumerate(vocab_chars)}
-    
-    # 替換空格為 '|'，並保留相同的 index
+
+    # 替換空格為分隔符號
     if " " in vocab_dict:
         space_index = vocab_dict[" "]
         vocab_dict["|"] = space_index
         del vocab_dict[" "]
         print(f"將空格替換為 '|'，索引為 {space_index}")
-    
-    # 使用詞彙表的長度作為新增特殊 token 的起始索引，避免 off-by-one 問題
-    new_index = len(vocab_dict)
-    vocab_dict["[UNK]"] = new_index
-    vocab_dict["[PAD]"] = new_index + 1
+
+    # 加入特殊符號（一定要加進 vocab_dict 裡才能寫入 JSON）
+    vocab_dict["[UNK]"] = len(vocab_dict)
+    vocab_dict["[PAD]"] = len(vocab_dict)
 
     print(f"最終詞彙表大小: {len(vocab_dict)}")
-    
-    # 將詞彙表存為 JSON
+
     with open(vocab_json_path, "w", encoding="utf-8") as f:
         json.dump(vocab_dict, f, ensure_ascii=False)
-    
-    # 建立 tokenizer
-    tokenizer = Wav2Vec2CTCTokenizer(vocab_json_path,
-                                     unk_token="[UNK]",
-                                     pad_token="[PAD]",
-                                     word_delimiter_token="|")
-    
+
+    tokenizer = Wav2Vec2CTCTokenizer(
+        vocab_json_path,
+        unk_token="[UNK]",
+        pad_token="[PAD]",
+        word_delimiter_token="|"
+    )
     return tokenizer, vocab_dict
 
 
