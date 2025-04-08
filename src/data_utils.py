@@ -5,136 +5,64 @@ import json
 import re  # 引入 re 模組以使用正則表達式
 
 def load_commonvoice_datasets():
-    """
-    載入 Common Voice 16.1 中文(臺灣) 與 臺語(閩南語) 的資料集，
-    並分別返回訓練、驗證、測試集。
-    """
-    # 載入中文(臺灣)資料集
-    cv_zh_train = load_dataset(
-        "mozilla-foundation/common_voice_16_1",
-        "zh-TW",
-        split="train",
-        trust_remote_code=True
-    )
-    cv_zh_valid = load_dataset(
-        "mozilla-foundation/common_voice_16_1",
-        "zh-TW",
-        split="validation",
-        trust_remote_code=True
-    )
-    cv_zh_test = load_dataset(
-        "mozilla-foundation/common_voice_16_1",
-        "zh-TW",
-        split="test",
-        trust_remote_code=True
-    )
+    cv_zh_train = load_dataset("mozilla-foundation/common_voice_16_1", "zh-TW", split="train", trust_remote_code=True)
+    cv_zh_valid = load_dataset("mozilla-foundation/common_voice_16_1", "zh-TW", split="validation", trust_remote_code=True)
+    cv_zh_test = load_dataset("mozilla-foundation/common_voice_16_1", "zh-TW", split="test", trust_remote_code=True)
 
-    # 載入臺語(閩南語)資料集
-    cv_tai_train = load_dataset(
-        "mozilla-foundation/common_voice_16_1",
-        "nan-tw",
-        split="train",
-        trust_remote_code=True
-    )
-    cv_tai_valid = load_dataset(
-        "mozilla-foundation/common_voice_16_1",
-        "nan-tw",
-        split="validation",
-        trust_remote_code=True
-    )
-    cv_tai_test = load_dataset(
-        "mozilla-foundation/common_voice_16_1",
-        "nan-tw",
-        split="test",
-        trust_remote_code=True
-    )
-    
-    return (cv_zh_train, cv_zh_valid, cv_zh_test,
-            cv_tai_train, cv_tai_valid, cv_tai_test)
+    cv_tai_train = load_dataset("mozilla-foundation/common_voice_16_1", "nan-tw", split="train", trust_remote_code=True)
+    cv_tai_valid = load_dataset("mozilla-foundation/common_voice_16_1", "nan-tw", split="validation", trust_remote_code=True)
+    cv_tai_test = load_dataset("mozilla-foundation/common_voice_16_1", "nan-tw", split="test", trust_remote_code=True)
 
+    return (cv_zh_train, cv_zh_valid, cv_zh_test, cv_tai_train, cv_tai_valid, cv_tai_test)
 
 def merge_datasets(cv_zh, cv_tai, split_name="train"):
-    """
-    合併中文與臺語資料集，並回傳合併後的資料集
-    """
     print(f"合併 {split_name} 資料集...")
     for _ in tqdm([1, 2], desc=f"合併 {split_name}"):
         pass
     merged_dataset = concatenate_datasets([cv_zh, cv_tai])
     return merged_dataset
 
-
 def clean_sentence(example):
-    """
-    清理標籤中的全形括號及其內容
-    """
     example['sentence'] = re.sub(r'（.*?）', '', example['sentence']).strip()
     return example
 
-
 def preprocess_dataset(train_dataset, valid_dataset, test_dataset):
-    """
-    清理標籤，移除不必要欄位，只保留 audio 與 sentence，
-    並將 audio 轉換成 16kHz 的取樣率
-    """
-    # 清理標籤
     train_dataset = train_dataset.map(clean_sentence)
     valid_dataset = valid_dataset.map(clean_sentence)
     test_dataset = test_dataset.map(clean_sentence)
-    
-    # 保留的欄位
+
     keep_cols = ["audio", "sentence"]
-    # 找出不需要的欄位（假設三個資料集欄位相同）
     cols_to_remove = [col for col in train_dataset.column_names if col not in keep_cols]
-    
+
     train_dataset = train_dataset.remove_columns(cols_to_remove)
     valid_dataset = valid_dataset.remove_columns(cols_to_remove)
-    test_dataset  = test_dataset.remove_columns(cols_to_remove)
-    
-    # cast audio 為 16kHz
+    test_dataset = test_dataset.remove_columns(cols_to_remove)
+
     train_dataset = train_dataset.cast_column("audio", Audio(sampling_rate=16000))
     valid_dataset = valid_dataset.cast_column("audio", Audio(sampling_rate=16000))
-    test_dataset  = test_dataset.cast_column("audio", Audio(sampling_rate=16000))
-    
+    test_dataset = test_dataset.cast_column("audio", Audio(sampling_rate=16000))
+
     return train_dataset, valid_dataset, test_dataset
 
-
 def build_vocab(train_dataset):
-    """
-    從訓練集中的 sentence 欄位建立字元集合
-    """
     all_texts = " ".join(train_dataset["sentence"])
     vocab_chars = sorted(set(all_texts))
     return vocab_chars
 
-
 def create_and_save_vocab(train_dataset, vocab_json_path="vocab.json"):
-    """
-    根據訓練資料建立字元集合、詞彙表字典，
-    並存成 JSON 檔，同時建立 Wav2Vec2CTCTokenizer。
-    保證 [PAD] (CTC blank token) 分配到索引 0，不會與其他 token 衝突。
-    """
-    # 從訓練資料建立字元集合
     vocab_chars = build_vocab(train_dataset)
     print(f"字元總數: {len(vocab_chars)}")
 
-    # 如果有空格，將其替換成 "|" (word delimiter token)
     if " " in vocab_chars:
         vocab_chars.remove(" ")
         if "|" not in vocab_chars:
             vocab_chars.append("|")
         print("將空格替換為 '|'")
 
-    # 重新排序，確保順序一致
     vocab_chars = sorted(vocab_chars)
-
-    # 建立詞彙表，保留索引 0 給 [PAD] (CTC blank token)
     vocab_dict = {"[PAD]": 0}
-    # 從索引 1 開始分配其他 token
     for idx, char in enumerate(vocab_chars, start=1):
         vocab_dict[char] = idx
-
-    # 加入 [UNK] token，分配到最後一個索引
     vocab_dict["[UNK]"] = len(vocab_dict)
 
     print(f"最終詞彙表大小: {len(vocab_dict)}")
@@ -150,11 +78,7 @@ def create_and_save_vocab(train_dataset, vocab_json_path="vocab.json"):
     )
     return tokenizer, vocab_dict
 
-
 def debug_check_labels(train_dataset, processor):
-    """
-    檢查訓練資料中所有句子的字元是否超出 vocab 範圍
-    """
     vocab = processor.tokenizer.get_vocab()
     vocab_size = processor.tokenizer.vocab_size
     unk_id = processor.tokenizer.unk_token_id
@@ -172,3 +96,24 @@ def debug_check_labels(train_dataset, processor):
 
     print(f"\n檢查完畢，共發現 {len(errors)} 筆異常。")
     return errors
+
+def filter_invalid_chars(dataset, processor):
+    """
+    自動清除不在詞彙表中的字元，避免訓練時出現 vocab 超出錯誤
+    """
+    vocab = processor.tokenizer.get_vocab()
+    valid_chars = set(vocab.keys())
+
+    def clean_invalid_chars(example):
+        original_sentence = example["sentence"]
+        cleaned_sentence = ''.join([char for char in original_sentence if char in valid_chars])
+        if cleaned_sentence.strip() == "":
+            cleaned_sentence = "[PAD]"
+        example["sentence"] = cleaned_sentence
+        return example
+
+    print("開始清除所有不在詞彙表中的字元...")
+    dataset = dataset.map(clean_invalid_chars, desc="清除不合法字元") 
+    print("清除完成")
+    return dataset
+

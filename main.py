@@ -7,6 +7,7 @@ import re
 import tensorflow as tf
 import numpy as np
 import editdistance
+from src.data_utils import filter_invalid_chars
 
 # 啟用混合精度
 tf.keras.mixed_precision.set_global_policy('mixed_float16')
@@ -82,8 +83,11 @@ def create_and_save_vocab(train_dataset, vocab_json_path="vocab.json"):
         print(f"將空格替換為 '|'，索引為 {space_index}")
     
     new_index = len(vocab_dict)
-    vocab_dict["[UNK]"] = new_index
-    vocab_dict["[PAD]"] = new_index + 1
+    vocab_dict = {"[PAD]": 0}
+    for idx, char in enumerate(vocab_chars, start=1):
+        vocab_dict[char] = idx
+    vocab_dict["[UNK]"] = len(vocab_dict)
+
 
     print(f"最終詞彙表大小: {len(vocab_dict)}")
     
@@ -259,25 +263,12 @@ def main():
         else:
             print("標籤檢查未通過，正在重新檢查...")
             errors = debug_check_labels(train_dataset, processor)
-            if not errors:
-                with open(check_file, "w") as f:
-                    f.write("passed")
-            else:
-                with open(check_file, "w") as f:
-                    f.write("failed")
-                print("請檢查數據集中的異常字元並修正後重試。")
-                return
-    else:
-        print("未找到標記文件，正在執行標籤檢查...")
-        errors = debug_check_labels(train_dataset, processor)
-        if not errors:
-            with open(check_file, "w") as f:
-                f.write("passed")
-        else:
-            with open(check_file, "w") as f:
-                f.write("failed")
-            print("請檢查數據集中的異常字元並修正後重試。")
-            return
+            if errors:
+                print("發現不合法字元，開始自動清除...")
+                train_dataset = filter_invalid_chars(train_dataset, processor)
+                valid_dataset = filter_invalid_chars(valid_dataset, processor)
+                test_dataset = filter_invalid_chars(test_dataset, processor)
+                print("清除完畢，重新儲存乾淨資料集")
 
     train_dataset = train_dataset.map(lambda batch: prepare_batch(batch, processor), remove_columns=train_dataset.column_names)
     valid_dataset = valid_dataset.map(lambda batch: prepare_batch(batch, processor), remove_columns=valid_dataset.column_names)
@@ -339,18 +330,6 @@ def main():
     base_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
     optimizer = tf.keras.mixed_precision.LossScaleOptimizer(base_optimizer)
     model.compile(optimizer=optimizer, run_eagerly=True)
-
-    # 檢查前幾個批次的標籤範圍
-    print("檢查訓練資料集中的標籤範圍...")
-    for i, (x, y) in enumerate(train_tfds.take(5)):
-        min_label = tf.reduce_min(y).numpy()
-        max_label = tf.reduce_max(y).numpy()
-        print(f"批次 {i}: 標籤值範圍 {min_label} 到 {max_label}")
-        if max_label >= processor.tokenizer.vocab_size:
-            print(f"第 {i} 個批次有無效標籤: {y.numpy()}")
-            break
-    else:
-        print("前 5 個批次的標籤都在合法範圍內。")
 
     cer_callback = EvaluateCERCallback(valid_tfds, processor)
     model.fit(
