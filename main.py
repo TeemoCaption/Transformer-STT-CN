@@ -246,9 +246,10 @@ def main():
     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
     model.compile(optimizer=optimizer)
 
+    # 輸入音訊的取樣率是 16000
     model.build(input_shape=(None, 16000))
+    # 模型摘要
     model.summary()
-
 
     # 8. 訓練迴圈
     num_epochs = 3
