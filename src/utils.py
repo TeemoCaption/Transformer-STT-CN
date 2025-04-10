@@ -25,29 +25,32 @@ def prepare_batch(batch, processor):
     """
     對單筆資料進行預處理：
       1. 使用 processor 特徵提取器，取得 input_values
-      2. 文字 -> token IDs
+      2. 將句子中的每個字元轉為 token ID
+         如果 token ID 超出合法範圍，則改為 unk_token_id。
     """
     assert isinstance(batch["sentence"], str), "句子必須是字符串"
-
-    # 音訊處理
+    
+    # 音訊處理：取得 input_values
     audio = batch["audio"]
     inputs = processor(audio["array"], 
                        sampling_rate=audio["sampling_rate"],
                        do_normalize=True)
     batch["input_values"] = inputs.input_values[0]
     batch["input_length"] = len(inputs.input_values[0])
-
-    # 文字轉 label IDs
+    
+    # 文字處理：將字元轉換為 token ID
     vocab = processor.tokenizer.get_vocab()
     vocab_size = processor.tokenizer.vocab_size
     unk_id = processor.tokenizer.unk_token_id
-    labels = [vocab.get(char, unk_id) for char in batch["sentence"]]
-
-    # 這裡純粹用 assert 做二次保險檢查
-    # 如果有 token ID 超過 vocab_size，就會噴錯
-    assert all(0 <= t < vocab_size for t in labels), (
-        f"Label IDs out of range (vocab_size={vocab_size}): {labels}"
-    )
+    
+    labels = []
+    for char in batch["sentence"]:
+        token = vocab.get(char, unk_id)
+        # 如果 token 超出合法範圍（即 token 值 >= vocab_size），就設為 unk
+        if token >= vocab_size:
+            token = unk_id
+        labels.append(token)
+    
     batch["labels"] = labels
     batch["labels_length"] = len(labels)
     return batch
