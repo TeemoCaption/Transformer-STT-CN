@@ -12,7 +12,6 @@ import tensorflow as tf
 import numpy as np
 import editdistance
 
-# 如果你的 data_utils.py 與 utils.py 在 src/ 下，請保持這樣的 import
 from src.data_utils import (
     load_commonvoice_datasets,
     merge_datasets,
@@ -23,9 +22,7 @@ from src.data_utils import (
 )
 from src.utils import get_processor, prepare_batch
 
-#---------------------------
-# 本程式全程使用 float32，因此移除混合精度設定
-# tf.keras.mixed_precision.set_global_policy('mixed_float16')
+tf.get_logger().setLevel('ERROR')
 
 # 設定 GPU 記憶體動態配置
 gpus = tf.config.list_physical_devices('GPU')
@@ -39,20 +36,15 @@ class KerasWav2Vec2ForCTC(tf.keras.Model):
         self.hf_model = hf_model
         self.processor = processor
 
-    # 移除 @tf.function 裝飾器以保證全部以 eager mode 執行，方便除錯
+    def call(self, inputs, training=False):
+        # 如果 inputs 為一組 tensor，直接呼叫 hf_model
+        return self.hf_model(inputs, training=training)
+    
     def train_step(self, data):
         x, y = data
 
-        # 將 -1 替換為 0，避免 CTC loss 出錯
         y = tf.where(y < 0, 0, y)
-
-        # 印出部分 debug 訊息
-        print("Train step: max_label =", tf.reduce_max(y).numpy())
-        print("Labels shape =", y.shape)
-        print("Labels sample =", y[:10].numpy())
-
         if tf.reduce_max(y).numpy() >= self.hf_model.config.vocab_size:
-            print("【DEBUG】發現無效標籤 (超出 vocab_size):", tf.reduce_max(y).numpy())
             raise ValueError(f"標籤值必須 <= vocab_size: {self.hf_model.config.vocab_size}")
 
         with tf.GradientTape() as tape:
@@ -68,6 +60,7 @@ class KerasWav2Vec2ForCTC(tf.keras.Model):
         outputs = self.hf_model(x, labels=y, training=False)
         loss = outputs.loss
         return {"loss": loss}
+
 
 class EvaluateCERCallback(tf.keras.callbacks.Callback):
     def __init__(self, valid_dataset, processor):
@@ -156,20 +149,20 @@ def main():
     processor = get_processor(tokenizer)
 
     # 3. 檢查資料集中是否有超出範圍的字元
-    print("開始進行字元檢查...")
-    errors_train = debug_check_labels(train_dataset, processor)
-    errors_valid = debug_check_labels(valid_dataset, processor)
-    errors_test  = debug_check_labels(test_dataset, processor)
+    # print("開始進行字元檢查...")
+    # errors_train = debug_check_labels(train_dataset, processor)
+    # errors_valid = debug_check_labels(valid_dataset, processor)
+    # errors_test  = debug_check_labels(test_dataset, processor)
 
-    if errors_train or errors_valid or errors_test:
-        print("發現超出範圍的字元，開始清理...")
-        train_dataset = filter_invalid_chars(train_dataset, processor)
-        valid_dataset = filter_invalid_chars(valid_dataset, processor)
-        test_dataset  = filter_invalid_chars(test_dataset, processor)
-        print("清理完成，重新檢查字元...")
-        debug_check_labels(train_dataset, processor)
-    else:
-        print("未發現超出範圍的字元，跳過清理步驟。")
+    # if errors_train or errors_valid or errors_test:
+    #     print("發現超出範圍的字元，開始清理...")
+    #     train_dataset = filter_invalid_chars(train_dataset, processor)
+    #     valid_dataset = filter_invalid_chars(valid_dataset, processor)
+    #     test_dataset  = filter_invalid_chars(test_dataset, processor)
+    #     print("清理完成，重新檢查字元...")
+    #     debug_check_labels(train_dataset, processor)
+    # else:
+    #     print("未發現超出範圍的字元，跳過清理步驟。")
 
     # 4. 將 dataset map 成 (input_values, labels)
     print("開始將 dataset map 成 (input_values, labels) ...")
@@ -217,48 +210,75 @@ def main():
         output_shapes=((None,), (None,))
     ).padded_batch(1, padded_shapes=([None], [None]), padding_values=(0.0, -1))
 
-    # 6. 初始化 HF 模型 (注意 vocab_size 必須與 tokenizer 相符)
-    from transformers import Wav2Vec2Config
-    config_kwargs = {
-        "vocab_size": processor.tokenizer.vocab_size,
-        "activation_dropout": 0.1,
-        "attention_dropout": 0.1,
-        "hidden_dropout": 0.1,
-    }
-    wav2vec_config = Wav2Vec2Config(**config_kwargs)
-    hf_model = TFWav2Vec2ForCTC(config=wav2vec_config)
+    # 6. 初始化預訓練模型並凍結指定層
+    pretrained_model_name = "facebook/wav2vec2-base"
+    tf.keras.mixed_precision.set_global_policy('float32')
+    vocab_size = processor.tokenizer.vocab_size
+    hf_model = TFWav2Vec2ForCTC.from_pretrained(
+        pretrained_model_name,
+        vocab_size=vocab_size,
+        pad_token_id=processor.tokenizer.pad_token_id,
+        from_pt=True
+    )
 
-    # 7. 包成 Keras Model (使用 float32 訓練)
+    # 凍結特徵提取層
+    hf_model.wav2vec2.feature_extractor.trainable = False
+
+    # Transformer 層存取方式修改
+    total_layers = len(hf_model.wav2vec2.encoder.layer)  # 使用 .layer
+    layers_to_train = 3  # 保留最後 3 層
+    freeze_until = total_layers - layers_to_train  # 凍結前 9 層
+
+    for i, layer in enumerate(hf_model.wav2vec2.encoder.layer):
+        if i < freeze_until:  # 前 9 層凍結
+            layer.trainable = False
+        else:  # 最後 3 層可訓練
+            layer.trainable = True
+
+    # 檢查凍結情況
+    print("特徵提取層是否可訓練:", hf_model.wav2vec2.feature_extractor.trainable)
+    for i, layer in enumerate(hf_model.wav2vec2.encoder.layer):
+        print(f"Transformer 層 {i}: trainable = {layer.trainable}")
+    print("lm_head 層是否可訓練:", hf_model.lm_head.trainable)
+
+    # 7. 包成 Keras Model
     model = KerasWav2Vec2ForCTC(hf_model=hf_model, processor=processor)
     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
     model.compile(optimizer=optimizer)
 
-    # 啟用 eager mode 以便獲得更詳細的錯誤資訊
-    #tf.config.run_functions_eagerly(True)
+    model.build(input_shape=(None, 16000))
+    model.summary()
 
-    # 8. 使用手動訓練迴圈進行訓練
+
+    # 8. 訓練迴圈
     num_epochs = 3
     for epoch in range(num_epochs):
         print(f"Epoch {epoch+1}/{num_epochs}")
         batch_num = 0
+        total_loss = 0.0
+        num_batches = 0
+
         for x, y in train_tf:
             try:
                 loss_dict = model.train_step((x, y))
+                total_loss += loss_dict['loss'].numpy()
+                num_batches += 1
             except Exception as e:
                 print(f"Error occurred at epoch {epoch+1}, batch {batch_num}")
                 print("x shape:", x.shape)
                 print("y shape:", y.shape)
-                print("First sample of y:", y[0].numpy())
                 raise e
             if batch_num % 10 == 0:
                 print(f"Epoch {epoch+1}, batch {batch_num}, loss: {loss_dict['loss'].numpy()}")
             batch_num += 1
 
-        # 每個 epoch 結束後在驗證集上評估
-        val_loss = model.evaluate(valid_tf)
+        avg_train_loss = total_loss / num_batches if num_batches > 0 else 0.0
+        print(f"Average training loss for epoch {epoch+1}: {avg_train_loss}")
+
+        val_loss = model.evaluate(valid_tf, verbose=0)
         print(f"Validation loss after epoch {epoch+1}: {val_loss}")
 
-    # 9. 最後在測試集上評估
+    # 9. 測試集評估
     print("測試集評估:")
     test_loss = model.evaluate(test_tf)
     print(f"Test Loss: {test_loss}")

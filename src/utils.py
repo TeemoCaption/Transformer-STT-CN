@@ -46,11 +46,11 @@ def prepare_batch(batch, processor):
     labels = []
     for char in batch["sentence"]:
         token = vocab.get(char, unk_id)
-        # 如果 token 超出合法範圍（即 token 值 >= vocab_size），就設為 unk
-        if token >= vocab_size:
-            token = unk_id
+        # 強制保證 token < vocab_size
+        token = token if token < vocab_size else unk_id
         labels.append(token)
     
     batch["labels"] = labels
     batch["labels_length"] = len(labels)
     return batch
+
