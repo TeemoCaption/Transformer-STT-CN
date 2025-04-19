@@ -5,6 +5,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import json
 import numpy as np
 import tensorflow as tf
+import matplotlib.pyplot as plt
 from transformers import (
     Wav2Vec2CTCTokenizer,
     Wav2Vec2FeatureExtractor,
@@ -14,12 +15,13 @@ from transformers import (
 from tensorflow.keras import Model as KerasModel
 from datasets import load_from_disk
 import editdistance
+import gc
 
 from src.data_utils import (
     load_commonvoice_datasets,
     merge_datasets,
     preprocess_dataset,
-    create_and_save_vocab
+    create_and_save_vocab,
 )
 from src.utils import get_processor, prepare_batch
 
@@ -30,7 +32,6 @@ for gpu in gpus:
 
 # 只保留 ERROR 訊息
 tf.get_logger().setLevel('ERROR')
-
 
 class KerasWav2Vec2ForCTC(KerasModel):
     """
@@ -74,7 +75,6 @@ class KerasWav2Vec2ForCTC(KerasModel):
         loss = outputs.loss
         return {"loss": loss}
 
-
 class EvaluateCERCallback(tf.keras.callbacks.Callback):
     """
     幫我們計算 Validation CER 的 Callback，
@@ -92,7 +92,6 @@ class EvaluateCERCallback(tf.keras.callbacks.Callback):
         vocab_size = self.model.hf_model.config.vocab_size
 
         for x, y in self.valid_dataset:
-            # clamp labels
             y = tf.where(y < 0, pad_id, y)
             y = tf.where(y < vocab_size, y, pad_id)
 
@@ -121,10 +120,9 @@ def main():
 
     # ─── 1. 載入 or 處理資料集 ────────────────────────
     cache_dir = "dataset/preprocessed"
-    train_p   = os.path.join(cache_dir, "train")
-    valid_p   = os.path.join(cache_dir, "valid")
-    test_p    = os.path.join(cache_dir, "test")
-
+    train_p, valid_p, test_p = (
+        os.path.join(cache_dir, name) for name in ("train","valid","test")
+    )
     if os.path.exists(train_p) and os.path.exists(valid_p) and os.path.exists(test_p):
         train_ds = load_from_disk(train_p)
         valid_ds = load_from_disk(valid_p)
@@ -135,7 +133,6 @@ def main():
         train_ds = merge_datasets(zh_tr, tai_tr, split_name="train")
         valid_ds = merge_datasets(zh_vl, tai_vl, split_name="valid")
         test_ds  = merge_datasets(zh_te, tai_te, split_name="test")
-
         train_ds, valid_ds, test_ds = preprocess_dataset(train_ds, valid_ds, test_ds)
         os.makedirs(cache_dir, exist_ok=True)
         train_ds.save_to_disk(train_p)
@@ -156,47 +153,35 @@ def main():
     processor = get_processor(tokenizer)
 
     # ─── 3. 轉成 (input_values, labels) ─────────────────
-    train_ds = train_ds.map(lambda b: prepare_batch(b, processor),
-                            remove_columns=train_ds.column_names, batched=False)
-    valid_ds = valid_ds.map(lambda b: prepare_batch(b, processor),
-                            remove_columns=valid_ds.column_names, batched=False)
-    test_ds  = test_ds.map(lambda b: prepare_batch(b, processor),
-                            remove_columns=test_ds.column_names, batched=False)
+    train_ds = train_ds.map(lambda b: prepare_batch(b, processor), remove_columns=train_ds.column_names, batched=False)
+    valid_ds = valid_ds.map(lambda b: prepare_batch(b, processor), remove_columns=valid_ds.column_names, batched=False)
+    test_ds  = test_ds.map(lambda b: prepare_batch(b, processor), remove_columns=test_ds.column_names, batched=False)
 
     # ─── 4. 建立 tf.data.Dataset ───────────────────────
     def gen(ds):
         for item in ds:
-            x = np.array(item["input_values"], dtype=np.float32)
-            y = np.array(item["labels"],      dtype=np.int32)
-            yield x, y
+            yield (
+                np.array(item["input_values"], dtype=np.float32),
+                np.array(item["labels"],      dtype=np.int32)
+            )
 
-    train_tf = tf.data.Dataset.from_generator(
-        lambda: gen(train_ds),
-        output_types=(tf.float32, tf.int32),
-        output_shapes=((None,), (None,))
-    ).padded_batch(1, padded_shapes=([None],[None]), padding_values=(0.0, -1))
-    valid_tf = tf.data.Dataset.from_generator(
-        lambda: gen(valid_ds),
-        output_types=(tf.float32, tf.int32),
-        output_shapes=((None,), (None,))
-    ).padded_batch(1, padded_shapes=([None],[None]), padding_values=(0.0, -1))
-    test_tf  = tf.data.Dataset.from_generator(
-        lambda: gen(test_ds),
-        output_types=(tf.float32, tf.int32),
-        output_shapes=((None,), (None,))
-    ).padded_batch(1, padded_shapes=([None],[None]), padding_values=(0.0, -1))
+    def make_tf(ds):
+        return tf.data.Dataset.from_generator(
+            lambda: gen(ds),
+            output_types=(tf.float32, tf.int32),
+            output_shapes=((None,), (None,))
+        ).padded_batch(1, padded_shapes=([None],[None]), padding_values=(0.0, -1))\
+         .prefetch(tf.data.AUTOTUNE)
 
-    # 使用 cache & prefetch 加速 I/O
-    train_tf = train_tf.prefetch(tf.data.AUTOTUNE)
-    valid_tf = valid_tf.prefetch(tf.data.AUTOTUNE)
-    test_tf  = test_tf.prefetch(tf.data.AUTOTUNE)
+    train_tf = make_tf(train_ds)
+    valid_tf = make_tf(valid_ds)
+    test_tf  = make_tf(test_ds)
 
     # ─── 5. 轉換 or 載入 TF 模型 ────────────────────────
-    pt_model_name = "facebook/wav2vec2-base"
-    if not os.path.isdir(pretrained_dir):
+    if not os.listdir(pretrained_dir):
         print("首次將 PyTorch 權重轉成 TF…")
         hf_model = TFWav2Vec2ForCTC.from_pretrained(
-            pt_model_name,
+            "facebook/wav2vec2-base",
             vocab_size=processor.tokenizer.vocab_size,
             pad_token_id=processor.tokenizer.pad_token_id,
             from_pt=True
@@ -225,60 +210,107 @@ def main():
     model.build(input_shape=(None, 16000))
     model.summary()
 
-    # ─── 7. 手動訓練迴圈 ─────────────────────────────────
-    epochs = 3
-    cer_cb = EvaluateCERCallback(valid_tf, processor)
-    cer_cb.set_model(model)
+    # ─── 7. 手動訓練迴圈，加入早停、記錄 Loss & CER ─────────────────
+    epochs = 50
+    patience = 3
+    best_val_loss = float("inf")
+    wait = 0
+
+    train_losses = []
+    val_losses   = []
+    val_cers     = []
+    cer_callback = EvaluateCERCallback(valid_tf, processor)
 
     for epoch in range(epochs):
         print(f"\nEpoch {epoch+1}/{epochs}")
+        model.reset_metrics()
 
         # --- train ---
         total_loss = 0.0
         steps = 0
         for x, y in train_tf:
-            out = model.train_step((x, y))
+            out  = model.train_step((x, y))
             loss = out["loss"].numpy().item()
             total_loss += loss
             steps += 1
             if steps % 10 == 0:
                 print(f"  [train] batch {steps}, loss: {loss:.4f}")
-        avg_train = total_loss / steps
-        print(f"  → Average training loss: {avg_train:.4f}")
+            del x, y, out, loss
+            gc.collect()
+        avg_train_loss = total_loss / steps
+        print(f"  → Average training loss: {avg_train_loss:.4f}")
 
         # --- validation loss ---
         print("  → Start validation loss computation…")
         total_val = 0.0
-        vsteps = 0
+        vsteps    = 0
         for x, y in valid_tf:
-            out = model.test_step((x, y))
+            out      = model.test_step((x, y))
             val_loss = out["loss"].numpy().item()
             total_val += val_loss
-            vsteps += 1
+            vsteps   += 1
             if vsteps % 10 == 0:
                 print(f"  [valid] batch {vsteps}, loss: {val_loss:.4f}")
-        avg_val = total_val / vsteps
-        print(f"  → Validation loss: {avg_val:.4f}")
+            del x, y, out, val_loss
+            gc.collect()
+        avg_val_loss = total_val / vsteps
+        print(f"  → Validation loss: {avg_val_loss:.4f}")
         print("  → Validation loss computation done")
 
-        # --- CER ---
-        cer_cb.on_epoch_end(epoch, logs={})
+        # 記錄 metrics
+        train_losses.append(avg_train_loss)
+        val_losses.append(avg_val_loss)
+        logs = {}
+        cer_callback.model = model
+        cer_callback.on_epoch_end(epoch, logs)
+        val_cers.append(logs["val_cer"])
 
-        # --- save weights ---
+        # 早停判斷
+        if avg_val_loss < best_val_loss:
+            print("驗證損失有進步，儲存最佳權重！")
+            best_val_loss = avg_val_loss
+            wait = 0
+            best_ckpt = os.path.join(model_root, "best_weights.h5")
+            model.save_weights(best_ckpt)
+        else:
+            wait += 1
+            print(f"{wait}/{patience} 個 epoch 沒進步")
+            if wait >= patience:
+                print(f"連續 {patience} 個 epoch 驗證損失都沒改善，觸發早停，停止訓練！")
+                break
+
+        # 存每 epoch 權重
         ckpt = os.path.join(model_root, f"weights_epoch_{epoch+1}.h5")
         model.save_weights(ckpt)
         print(f"  → 已儲存權重到 {ckpt}")
 
-    # ─── 8. 測試集評估 & HF 格式存檔 ───────────────────
+    # ─── 8. 繪製 Loss & CER 曲線 ─────────────────────────
+    epochs_range = range(1, len(train_losses) + 1)
+    
+    plt.figure()
+    plt.plot(epochs_range, train_losses, linestyle='-')
+    plt.plot(epochs_range, val_losses,   linestyle='--')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend(['Train Loss', 'Validation Loss'])
+    plt.title('Train vs Validation Loss per Epoch')
+    plt.show()
+
+    plt.figure()
+    plt.plot(epochs_range, val_cers, linestyle='-')
+    plt.xlabel('Epoch')
+    plt.ylabel('Validation CER')
+    plt.title('Validation CER per Epoch')
+    plt.show()
+
+    # ─── 9. 測試集評估 & HF 格式存檔 ───────────────────
     print("\n=== 最終測試集評估 ===")
     test_loss = model.evaluate(test_tf, verbose=0)
     print(f"Test Loss: {test_loss:.4f}")
 
-    # 保存整個 HF 模型與 processor
     hf_model.save_pretrained(os.path.join(model_root, "finetuned_hf"))
     processor.save_pretrained(os.path.join(model_root, "finetuned_hf"))
     print("已儲存 Hugging Face 格式模型到 model/finetuned_hf")
-
 
 if __name__ == "__main__":
     main()
